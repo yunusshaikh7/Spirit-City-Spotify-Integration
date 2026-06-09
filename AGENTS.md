@@ -108,6 +108,14 @@ If Spirit Sync fails, the launcher should fall back to starting the game without
 - visible label becomes `Spirit Sync`;
 - the external URL becomes `http://127.0.0.1:8012/spirit-sync` by default.
 
+In `watch` mode it also monitors:
+
+```text
+%LOCALAPPDATA%\SpiritCity\Saved\SaveGames\SCLS_MusicPlayer.sav
+```
+
+When the native music player save transitions into `Playing`, it asks the local bridge to pause Spotify. This is intentionally one-way: built-in Spirit City lists should stop Spotify, but native bottom-bar controls are not fully remapped to Spotify yet.
+
 This is a runtime patch because the current game build stores the Web Music Player list in cooked Unreal data, not in an easy plain JSON file. Keep the patcher conservative and fail-safe. It should only run against the Spirit City process and should tolerate no matches.
 
 The patcher is specific to the currently observed Steam build. If the game updates and the entry stops appearing, inspect the new external music strings and update the replacement table.
@@ -257,6 +265,7 @@ Before release, scan committed files and the zip for:
 - The external tile currently reuses an existing game thumbnail.
 - The in-game page defaults to Web API remote control of an existing Spotify device. Acting as its own Spotify Connect device is experimental and depends on Spotify's Web Playback SDK working inside Spirit City's embedded CEF browser.
 - The native bottom song bar is not integrated yet.
+- Native built-in list playback pauses Spotify through the runtime patcher's save-file monitor.
 - Runtime menu patching depends on strings observed in the current Steam build.
 
 ## Useful Investigation Tools

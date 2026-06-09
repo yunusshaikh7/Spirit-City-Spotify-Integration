@@ -13,6 +13,7 @@ Still rough:
 - The tile still uses one of the game's existing thumbnail images.
 - Spotify playback appears in the in-game External web panel, not the bottom native song bar. Spirit City's own YouTube External players behave the same way.
 - The in-game page defaults to PC/existing-device remote control; separate-device mode is experimental.
+- Starting a built-in Spirit City music-list track pauses Spotify.
 - The installer and uninstaller are unsigned Windows EXEs included in the release zip.
 
 ## Requirements
@@ -129,6 +130,7 @@ Implementation notes for automated contributors live in [AGENTS.md](AGENTS.md).
 - Playback API for devices, play, pause, next, previous, shuffle, repeat, transfer, status, and now-playing metadata.
 - Replacement launcher project that can mirror the old mod's `SpiritCity.exe` / `SpiritCityBackup.exe` install layout.
 - Runtime patcher that renames the first Web Music Player entry to `Spirit Sync` and points it at the local in-game Spotify page.
+- Runtime monitor that pauses Spotify when Spirit City's native music-player save enters `Playing`.
 - Legacy `spirit-sync.env` compatibility for the old README's `ClientID`, `ClientSecret`, and `SpotifyUser` names.
 
 ## Spotify App Setup

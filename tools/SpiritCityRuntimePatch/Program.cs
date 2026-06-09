@@ -1,5 +1,7 @@
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Net.Http.Headers;
+using System.Text.Json;
 using System.Runtime.InteropServices;
 using System.Text;
 
@@ -7,6 +9,18 @@ var mode = args.FirstOrDefault() ?? "scan";
 var processName = GetArg(args, "--process") ?? "SpiritCity-Win64-Shipping";
 var quiet = args.Any(arg => arg.Equals("--quiet", StringComparison.OrdinalIgnoreCase));
 var replacementUrl = GetArg(args, "--url") ?? "http://127.0.0.1:8012/spirit-sync";
+var bridgeBaseUrl = (GetArg(args, "--bridge-url") ?? "http://127.0.0.1:8012").TrimEnd('/');
+var musicSavePath = GetArg(args, "--music-save")
+    ?? Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "SpiritCity",
+        "Saved",
+        "SaveGames",
+        "SCLS_MusicPlayer.sav"
+    );
+var nativeSpotifyPauseEnabled = !args.Any(arg =>
+    arg.Equals("--no-native-spotify-pause", StringComparison.OrdinalIgnoreCase)
+);
 var process = Process.GetProcessesByName(processName).FirstOrDefault()
     ?? throw new InvalidOperationException($"Process not found: {processName}");
 
@@ -51,7 +65,10 @@ else if (mode.Equals("watch", StringComparison.OrdinalIgnoreCase))
         TimeSpan.FromMilliseconds(interval),
         TimeSpan.FromSeconds(duration),
         quiet,
-        replacementUrl
+        replacementUrl,
+        nativeSpotifyPauseEnabled
+            ? new NativeMusicMonitor(musicSavePath, bridgeBaseUrl, quiet)
+            : null
     );
     Console.WriteLine($"totalApplied={total}");
 }
@@ -77,7 +94,7 @@ else if (mode.Equals("refs", StringComparison.OrdinalIgnoreCase))
 }
 else
 {
-    throw new ArgumentException("Usage: SpiritCityRuntimePatch scan [terms...] | dump <hex-address> [length] | refs [terms...] | patch | watch [--interval-ms=1500] [--duration-sec=120] [--quiet]");
+    throw new ArgumentException("Usage: SpiritCityRuntimePatch scan [terms...] | dump <hex-address> [length] | refs [terms...] | patch | watch [--interval-ms=1500] [--duration-sec=120] [--quiet] [--bridge-url=http://127.0.0.1:8012] [--music-save=<path>] [--no-native-spotify-pause]");
 }
 
 static void Scan(SafeProcessHandle handle, string[] terms)
@@ -120,23 +137,32 @@ static int WatchSpiritSync(
     TimeSpan interval,
     TimeSpan duration,
     bool quiet,
-    string replacementUrl
+    string replacementUrl,
+    NativeMusicMonitor? nativeMusicMonitor
 )
 {
     var total = 0;
     var deadline = DateTimeOffset.UtcNow + duration;
 
-    while (DateTimeOffset.UtcNow < deadline)
+    nativeMusicMonitor?.Start(TimeSpan.FromMilliseconds(500));
+    try
     {
-        var applied = PatchSpiritSync(handle, quiet, replacementUrl);
-        total += applied;
-
-        if (!quiet && applied > 0)
+        while (DateTimeOffset.UtcNow < deadline)
         {
-            Console.WriteLine($"watchPatched={applied}");
-        }
+            var applied = PatchSpiritSync(handle, quiet, replacementUrl);
+            total += applied;
 
-        Thread.Sleep(interval);
+            if (!quiet && applied > 0)
+            {
+                Console.WriteLine($"watchPatched={applied}");
+            }
+
+            Thread.Sleep(interval);
+        }
+    }
+    finally
+    {
+        nativeMusicMonitor?.Stop();
     }
 
     return total;
@@ -451,6 +477,145 @@ static string? GetArg(string[] args, string name)
 static SafeProcessHandle OpenProcess(ProcessAccess access, bool inheritHandle, int processId)
 {
     return Native.OpenProcess(access, inheritHandle, processId);
+}
+
+sealed class NativeMusicMonitor
+{
+    private static readonly byte[] PlayingToken = Encoding.UTF8.GetBytes("Playing");
+    private readonly string musicSavePath;
+    private readonly string bridgeBaseUrl;
+    private readonly bool quiet;
+    private readonly HttpClient http = new();
+    private Thread? thread;
+    private volatile bool stopping;
+    private bool wasPlaying;
+
+    public NativeMusicMonitor(string musicSavePath, string bridgeBaseUrl, bool quiet)
+    {
+        this.musicSavePath = musicSavePath;
+        this.bridgeBaseUrl = bridgeBaseUrl;
+        this.quiet = quiet;
+        http.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+    }
+
+    public void Start(TimeSpan pollInterval)
+    {
+        thread = new Thread(() =>
+        {
+            while (!stopping)
+            {
+                Poll();
+                Thread.Sleep(pollInterval);
+            }
+        })
+        {
+            IsBackground = true,
+            Name = "Spirit Sync native music monitor",
+        };
+        thread.Start();
+    }
+
+    public void Stop()
+    {
+        stopping = true;
+        thread?.Join(TimeSpan.FromSeconds(1));
+    }
+
+    public void Poll()
+    {
+        var isPlaying = IsNativeMusicPlaying();
+        if (isPlaying && !wasPlaying)
+        {
+            PauseSpotifyIfPlaying();
+        }
+
+        wasPlaying = isPlaying;
+    }
+
+    private bool IsNativeMusicPlaying()
+    {
+        try
+        {
+            using var stream = new FileStream(
+                musicSavePath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete
+            );
+            if (stream.Length <= 0 || stream.Length > 1024 * 1024)
+            {
+                return false;
+            }
+
+            var buffer = new byte[stream.Length];
+            var bytesRead = stream.Read(buffer, 0, buffer.Length);
+            return Contains(buffer, bytesRead, PlayingToken);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private void PauseSpotifyIfPlaying()
+    {
+        try
+        {
+            if (!IsSpotifyPlaying())
+            {
+                return;
+            }
+
+            using var content = new StringContent("{}", Encoding.UTF8, "application/json");
+            using var response = http.PostAsync($"{bridgeBaseUrl}/api/player/pause", content)
+                .GetAwaiter()
+                .GetResult();
+
+            if (!quiet)
+            {
+                Console.WriteLine(
+                    response.IsSuccessStatusCode
+                        ? "nativeMusicPausedSpotify=true"
+                        : $"nativeMusicPausedSpotify=false status={(int)response.StatusCode}"
+                );
+            }
+        }
+        catch (Exception error)
+        {
+            if (!quiet)
+            {
+                Console.WriteLine($"nativeMusicPausedSpotify=false error={error.Message}");
+            }
+        }
+    }
+
+    private bool IsSpotifyPlaying()
+    {
+        using var response = http.GetAsync($"{bridgeBaseUrl}/api/status")
+            .GetAwaiter()
+            .GetResult();
+        if (!response.IsSuccessStatusCode)
+        {
+            return false;
+        }
+
+        var json = response.Content.ReadAsStringAsync().GetAwaiter().GetResult();
+        using var document = JsonDocument.Parse(json);
+        return document.RootElement.TryGetProperty("playback", out var playback)
+            && playback.ValueKind == JsonValueKind.Object
+            && playback.TryGetProperty("is_playing", out var isPlaying)
+            && isPlaying.ValueKind == JsonValueKind.True;
+    }
+
+    private static bool Contains(byte[] buffer, int length, byte[] needle)
+    {
+        if (needle.Length == 0 || length < needle.Length)
+        {
+            return false;
+        }
+
+        return buffer.AsSpan(0, length).IndexOf(needle) >= 0;
+    }
 }
 
 [Flags]

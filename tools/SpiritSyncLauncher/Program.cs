@@ -59,7 +59,7 @@ try
 
     var runtimePatcher = options.NoRuntimePatch
         ? null
-        : StartRuntimePatcher(bridgeRoot, inGameUrl);
+        : StartRuntimePatcher(bridgeRoot, inGameUrl, bridgeBaseUrl);
 
     await gameProcess.WaitForExitAsync();
     cancellation.Cancel();
@@ -292,7 +292,7 @@ static Process StartGame(string gameRoot, IReadOnlyList<string> gameArgs, int ce
     ) ?? throw new InvalidOperationException("Could not start Spirit City.");
 }
 
-static Process? StartRuntimePatcher(string bridgeRoot, string inGameUrl)
+static Process? StartRuntimePatcher(string bridgeRoot, string inGameUrl, string bridgeBaseUrl)
 {
     var patcherPath = new[]
     {
@@ -320,6 +320,7 @@ static Process? StartRuntimePatcher(string bridgeRoot, string inGameUrl)
         startInfo.ArgumentList.Add("--interval-ms=1500");
         startInfo.ArgumentList.Add("--quiet");
         startInfo.ArgumentList.Add($"--url={inGameUrl}");
+        startInfo.ArgumentList.Add($"--bridge-url={bridgeBaseUrl}");
 
         var process = Process.Start(startInfo);
         if (process is not null)

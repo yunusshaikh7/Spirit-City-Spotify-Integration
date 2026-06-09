@@ -12,7 +12,7 @@ Still rough:
 
 - The tile still uses one of the game's existing thumbnail images.
 - Spotify playback appears in the in-game External web panel, not the bottom native song bar. Spirit City's own YouTube External players behave the same way.
-- The installer is a PowerShell/source install for now, not a one-click signed EXE.
+- The installer and uninstaller are unsigned Windows EXEs included in the release zip.
 
 ## Requirements
 
@@ -105,6 +105,10 @@ Source uninstall:
 ```
 
 Add `-RemoveSpiritSyncFiles` to also remove the copied `SpiritSync` folder and `spirit-sync.env`.
+
+## Maintainer Notes
+
+Implementation notes for automated contributors live in [AGENTS.md](AGENTS.md).
 
 ## What Exists
 

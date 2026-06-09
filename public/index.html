@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Spirit Sync - Spotify Integration for Spirit City: Lofi Sessions</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="player-panel">
+        <div class="identity">
+          <span class="eyebrow">Spirit Sync</span>
+          <h1>Spotify</h1>
+          <p id="connectionStatus">Checking connection...</p>
+        </div>
+
+        <div class="now-playing">
+          <img id="albumArt" alt="" />
+          <div>
+            <p id="trackTitle">Nothing playing</p>
+            <p id="trackArtist">Connect Spotify to begin</p>
+          </div>
+        </div>
+
+        <div class="controls" aria-label="Playback controls">
+          <button id="previousButton" type="button" title="Previous track">
+            &#9664;&#9664;
+          </button>
+          <button id="playButton" type="button" title="Play">
+            Play
+          </button>
+          <button id="pauseButton" type="button" title="Pause">
+            Pause
+          </button>
+          <button id="nextButton" type="button" title="Next track">
+            &#9654;&#9654;
+          </button>
+        </div>
+
+        <div class="secondary-controls">
+          <label>
+            <input id="shuffleToggle" type="checkbox" />
+            Shuffle
+          </label>
+          <select id="repeatSelect" aria-label="Repeat mode">
+            <option value="off">Repeat off</option>
+            <option value="context">Repeat playlist</option>
+            <option value="track">Repeat track</option>
+          </select>
+          <button id="loginButton" type="button">Log in</button>
+          <button id="logoutButton" type="button">Log out</button>
+        </div>
+      </section>
+    </main>
+
+    <script src="https://sdk.scdn.co/spotify-player.js"></script>
+    <script src="/player.js" type="module"></script>
+  </body>
+</html>

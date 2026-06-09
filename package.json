@@ -1,0 +1,31 @@
+{
+  "name": "spirit-sync-spotify-integration",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Spirit Sync - Spotify Integration for Spirit City: Lofi Sessions.",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx watch src/server.ts",
+    "start": "node dist/server.js"
+  },
+  "keywords": [
+    "spirit-city",
+    "spotify",
+    "web-playback-sdk",
+    "mod"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "cookie-parser": "^1.4.7",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1"
+  },
+  "devDependencies": {
+    "@types/cookie-parser": "^1.4.10",
+    "@types/express": "^5.0.6",
+    "@types/node": "^25.9.2",
+    "tsx": "^4.22.4",
+    "typescript": "^6.0.3"
+  }
+}

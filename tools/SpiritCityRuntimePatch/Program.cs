@@ -6,6 +6,7 @@ using System.Text;
 var mode = args.FirstOrDefault() ?? "scan";
 var processName = GetArg(args, "--process") ?? "SpiritCity-Win64-Shipping";
 var quiet = args.Any(arg => arg.Equals("--quiet", StringComparison.OrdinalIgnoreCase));
+var replacementUrl = GetArg(args, "--url") ?? "http://127.0.0.1:8012/spirit-sync";
 var process = Process.GetProcessesByName(processName).FirstOrDefault()
     ?? throw new InvalidOperationException($"Process not found: {processName}");
 
@@ -35,7 +36,7 @@ if (mode.Equals("scan", StringComparison.OrdinalIgnoreCase))
 }
 else if (mode.Equals("patch", StringComparison.OrdinalIgnoreCase))
 {
-    Console.WriteLine($"applied={PatchSpiritSync(handle, quiet)}");
+    Console.WriteLine($"applied={PatchSpiritSync(handle, quiet, replacementUrl)}");
 }
 else if (mode.Equals("watch", StringComparison.OrdinalIgnoreCase))
 {
@@ -45,7 +46,13 @@ else if (mode.Equals("watch", StringComparison.OrdinalIgnoreCase))
     var duration = int.TryParse(GetArg(args, "--duration-sec") ?? "", out var parsedDuration)
         ? parsedDuration
         : 120;
-    var total = WatchSpiritSync(handle, TimeSpan.FromMilliseconds(interval), TimeSpan.FromSeconds(duration), quiet);
+    var total = WatchSpiritSync(
+        handle,
+        TimeSpan.FromMilliseconds(interval),
+        TimeSpan.FromSeconds(duration),
+        quiet,
+        replacementUrl
+    );
     Console.WriteLine($"totalApplied={total}");
 }
 else if (mode.Equals("dump", StringComparison.OrdinalIgnoreCase))
@@ -108,14 +115,20 @@ static void Scan(SafeProcessHandle handle, string[] terms)
     }
 }
 
-static int WatchSpiritSync(SafeProcessHandle handle, TimeSpan interval, TimeSpan duration, bool quiet)
+static int WatchSpiritSync(
+    SafeProcessHandle handle,
+    TimeSpan interval,
+    TimeSpan duration,
+    bool quiet,
+    string replacementUrl
+)
 {
     var total = 0;
     var deadline = DateTimeOffset.UtcNow + duration;
 
     while (DateTimeOffset.UtcNow < deadline)
     {
-        var applied = PatchSpiritSync(handle, quiet);
+        var applied = PatchSpiritSync(handle, quiet, replacementUrl);
         total += applied;
 
         if (!quiet && applied > 0)
@@ -129,7 +142,7 @@ static int WatchSpiritSync(SafeProcessHandle handle, TimeSpan interval, TimeSpan
     return total;
 }
 
-static int PatchSpiritSync(SafeProcessHandle handle, bool quiet)
+static int PatchSpiritSync(SafeProcessHandle handle, bool quiet, string replacementUrl)
 {
     var replacements = new[]
     {
@@ -137,27 +150,27 @@ static int PatchSpiritSync(SafeProcessHandle handle, bool quiet)
         Replacement.Utf8("Peaceful Piano", "Spirit Sync"),
         Replacement.Utf16("Peaceful Day .... [calm piano] - YouTube", "Spirit Sync"),
         Replacement.Utf8("Peaceful Day .... [calm piano] - YouTube", "Spirit Sync"),
-        Replacement.Utf16("https://youtu.be/cYPJaHT5f3E?si=Y9jpHpyDpU8WPzgY", "http://127.0.0.1:8012/spirit-sync"),
-        Replacement.Utf8("https://youtu.be/cYPJaHT5f3E?si=Y9jpHpyDpU8WPzgY", "http://127.0.0.1:8012/spirit-sync"),
-        Replacement.Utf16("http://youtu.be/cYPJaHT5f3E?si=Y9jpHpyDpU8WPzgY", "http://127.0.0.1:8012/spirit-sync"),
-        Replacement.Utf8("http://youtu.be/cYPJaHT5f3E?si=Y9jpHpyDpU8WPzgY", "http://127.0.0.1:8012/spirit-sync"),
-        Replacement.Utf16("https://www.youtube.com/watch?si=Y9jpHpyDpU8WPzgY&v=cYPJaHT5f3E&feature=youtu.be", "http://127.0.0.1:8012/spirit-sync"),
-        Replacement.Utf8("https://www.youtube.com/watch?si=Y9jpHpyDpU8WPzgY&v=cYPJaHT5f3E&feature=youtu.be", "http://127.0.0.1:8012/spirit-sync"),
-        Replacement.Utf16("http://www.youtube.com/watch?si=Y9jpHpyDpU8WPzgY&v=cYPJaHT5f3E&feature=youtu.be", "http://127.0.0.1:8012/spirit-sync"),
-        Replacement.Utf8("http://www.youtube.com/watch?si=Y9jpHpyDpU8WPzgY&v=cYPJaHT5f3E&feature=youtu.be", "http://127.0.0.1:8012/spirit-sync"),
-        Replacement.Utf16("watch?si=Y9jpHpyDpU8WPzgY&v=cYPJaHT5f3E&feature=youtu.be", "http://127.0.0.1:8012/spirit-sync"),
-        Replacement.Utf8("watch?si=Y9jpHpyDpU8WPzgY&v=cYPJaHT5f3E&feature=youtu.be", "http://127.0.0.1:8012/spirit-sync"),
-        Replacement.Utf16("https://www.youtube.com/watch?v=cYPJaHT5f3E", "http://127.0.0.1:8012/spirit-sync"),
-        Replacement.Utf8("https://www.youtube.com/watch?v=cYPJaHT5f3E", "http://127.0.0.1:8012/spirit-sync"),
-        Replacement.Utf16("http://www.youtube.com/watch?v=cYPJaHT5f3E", "http://127.0.0.1:8012/spirit-sync"),
-        Replacement.Utf8("http://www.youtube.com/watch?v=cYPJaHT5f3E", "http://127.0.0.1:8012/spirit-sync"),
-        Replacement.Utf16("https://youtube.com/watch?v=cYPJaHT5f3E", "http://127.0.0.1:8012/spirit-sync"),
-        Replacement.Utf8("https://youtube.com/watch?v=cYPJaHT5f3E", "http://127.0.0.1:8012/spirit-sync"),
-        Replacement.Utf16("http://youtube.com/watch?v=cYPJaHT5f3E", "http://127.0.0.1:8012/spirit-sync"),
-        Replacement.Utf8("http://youtube.com/watch?v=cYPJaHT5f3E", "http://127.0.0.1:8012/spirit-sync"),
-        Replacement.Utf16("youtube.com/watch?v=cYPJaHT5f3E", "http://127.0.0.1:8012/spirit-sync"),
-        Replacement.Utf8("youtube.com/watch?v=cYPJaHT5f3E", "http://127.0.0.1:8012/spirit-sync"),
-    };
+        Replacement.Utf16("https://youtu.be/cYPJaHT5f3E?si=Y9jpHpyDpU8WPzgY", replacementUrl),
+        Replacement.Utf8("https://youtu.be/cYPJaHT5f3E?si=Y9jpHpyDpU8WPzgY", replacementUrl),
+        Replacement.Utf16("http://youtu.be/cYPJaHT5f3E?si=Y9jpHpyDpU8WPzgY", replacementUrl),
+        Replacement.Utf8("http://youtu.be/cYPJaHT5f3E?si=Y9jpHpyDpU8WPzgY", replacementUrl),
+        Replacement.Utf16("https://www.youtube.com/watch?si=Y9jpHpyDpU8WPzgY&v=cYPJaHT5f3E&feature=youtu.be", replacementUrl),
+        Replacement.Utf8("https://www.youtube.com/watch?si=Y9jpHpyDpU8WPzgY&v=cYPJaHT5f3E&feature=youtu.be", replacementUrl),
+        Replacement.Utf16("http://www.youtube.com/watch?si=Y9jpHpyDpU8WPzgY&v=cYPJaHT5f3E&feature=youtu.be", replacementUrl),
+        Replacement.Utf8("http://www.youtube.com/watch?si=Y9jpHpyDpU8WPzgY&v=cYPJaHT5f3E&feature=youtu.be", replacementUrl),
+        Replacement.Utf16("watch?si=Y9jpHpyDpU8WPzgY&v=cYPJaHT5f3E&feature=youtu.be", replacementUrl),
+        Replacement.Utf8("watch?si=Y9jpHpyDpU8WPzgY&v=cYPJaHT5f3E&feature=youtu.be", replacementUrl),
+        Replacement.Utf16("https://www.youtube.com/watch?v=cYPJaHT5f3E", replacementUrl),
+        Replacement.Utf8("https://www.youtube.com/watch?v=cYPJaHT5f3E", replacementUrl),
+        Replacement.Utf16("http://www.youtube.com/watch?v=cYPJaHT5f3E", replacementUrl),
+        Replacement.Utf8("http://www.youtube.com/watch?v=cYPJaHT5f3E", replacementUrl),
+        Replacement.Utf16("https://youtube.com/watch?v=cYPJaHT5f3E", replacementUrl),
+        Replacement.Utf8("https://youtube.com/watch?v=cYPJaHT5f3E", replacementUrl),
+        Replacement.Utf16("http://youtube.com/watch?v=cYPJaHT5f3E", replacementUrl),
+        Replacement.Utf8("http://youtube.com/watch?v=cYPJaHT5f3E", replacementUrl),
+        Replacement.Utf16("youtube.com/watch?v=cYPJaHT5f3E", replacementUrl),
+        Replacement.Utf8("youtube.com/watch?v=cYPJaHT5f3E", replacementUrl),
+    }.Where(replacement => replacement.CanFit).ToArray();
 
     var applied = 0;
 
@@ -506,6 +519,8 @@ sealed record Replacement(string Label, byte[] From, byte[] To)
 
     public static Replacement Utf16(string from, string to) =>
         new($"{from} -> {to} [utf16]", Encoding.Unicode.GetBytes(from), Encoding.Unicode.GetBytes(to));
+
+    public bool CanFit => To.Length <= From.Length;
 
     public byte[] ToPadded()
     {

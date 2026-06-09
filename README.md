@@ -12,6 +12,7 @@ Still rough:
 
 - The tile still uses one of the game's existing thumbnail images.
 - Spotify playback appears in the in-game External web panel, not the bottom native song bar. Spirit City's own YouTube External players behave the same way.
+- The in-game page defaults to PC/existing-device remote control; separate-device mode is experimental.
 - The installer and uninstaller are unsigned Windows EXEs included in the release zip.
 
 ## Requirements
@@ -19,7 +20,6 @@ Still rough:
 - Windows.
 - Steam version of **Spirit City: Lofi Sessions**.
 - Spotify Premium.
-- Spotify desktop app open on the PC.
 - Node.js 20 or newer.
 - A Spotify developer app with this redirect URI:
 
@@ -62,6 +62,8 @@ Put your Spotify client ID in `.env`:
 PORT=8012
 SPOTIFY_CLIENT_ID=your_spotify_client_id_here
 SPOTIFY_REDIRECT_URI=http://127.0.0.1:8012/auth/callback
+SPOTIFY_DEVICE_NAME=Spirit Sync
+SPOTIFY_PLAYBACK_MODE=remote
 ```
 
 Launch Spirit City through Steam. The first launch may open Spotify login at:
@@ -71,6 +73,8 @@ http://127.0.0.1:8012/login
 ```
 
 After login, open **Music -> Web Music Player -> External** in game and choose `Spirit Sync`.
+
+Use the in-page device selector to choose `Spirit Sync`, Spotify Desktop, or another available Spotify Connect device.
 
 ## Uninstall
 
@@ -113,9 +117,15 @@ Implementation notes for automated contributors live in [AGENTS.md](AGENTS.md).
 ## What Exists
 
 - Local Spotify OAuth login using Authorization Code with PKCE.
-- Local Spotify Web Playback SDK device for the normal browser page.
+- Local Spotify Web Playback SDK device for the normal browser page; the in-game page can try it only in experimental `device` or `auto` mode.
 - Browser player at `http://127.0.0.1:8012`.
-- In-game oriented page at `http://127.0.0.1:8012/spirit-sync` that controls the open Spotify desktop app through the Web API instead of relying on CEF to become a Spotify speaker.
+- In-game oriented page at `http://127.0.0.1:8012/spirit-sync`.
+- Playback modes:
+  - `device`: only play through the `Spirit Sync` Web Playback SDK device.
+  - `remote`: intentionally control Spotify Desktop or another existing Spotify device.
+  - `auto`: try `Spirit Sync` first, then fall back to existing-device remote control.
+- In-page Spotify Connect device selector with saved selection.
+- Experimental Spotify web app handoff at `http://127.0.0.1:8012/spotify`.
 - Playback API for devices, play, pause, next, previous, shuffle, repeat, transfer, status, and now-playing metadata.
 - Replacement launcher project that can mirror the old mod's `SpiritCity.exe` / `SpiritCityBackup.exe` install layout.
 - Runtime patcher that renames the first Web Music Player entry to `Spirit Sync` and points it at the local in-game Spotify page.
@@ -170,6 +180,28 @@ SpotifyUser=""
 ```
 
 This bridge will read `spirit-sync.env` from the current working directory, or from `SPIRIT_CITY_INSTALL_DIR` if the launcher script is used.
+
+Optional device name:
+
+```env
+SpotifyDeviceName="Spirit Sync"
+```
+
+Optional playback mode:
+
+```env
+SpotifyPlaybackMode="remote"
+```
+
+Use `SpotifyPlaybackMode="remote"` to make Spirit Sync just remote-control Spotify on the PC. Use `SpotifyPlaybackMode="auto"` to try the separate `Spirit Sync` device first and fall back to remote control.
+
+Optional in-game URL:
+
+```env
+SpiritSyncExternalUrl="http://127.0.0.1:8012/spirit-sync"
+```
+
+Set this to `http://127.0.0.1:8012/spotify` to test Spotify's own web UI inside Spirit City's external browser.
 
 ## Launcher Script
 

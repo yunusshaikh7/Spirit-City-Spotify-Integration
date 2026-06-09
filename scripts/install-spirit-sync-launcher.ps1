@@ -225,12 +225,27 @@ if (-not (Test-Path -LiteralPath $envPath)) {
 
         $sourceClientSecret = Get-DotEnvValue -Path $sourceEnv -Names @("SPOTIFY_CLIENT_SECRET", "ClientSecret")
         $sourceSpotifyUser = Get-DotEnvValue -Path $sourceEnv -Names @("SPOTIFY_USER", "SpotifyUser")
+        $sourceSpotifyDeviceName = Get-DotEnvValue -Path $sourceEnv -Names @("SPOTIFY_DEVICE_NAME", "SpotifyDeviceName")
+        if (-not $sourceSpotifyDeviceName) {
+            $sourceSpotifyDeviceName = "Spirit Sync"
+        }
+        $sourceSpotifyPlaybackMode = Get-DotEnvValue -Path $sourceEnv -Names @("SPOTIFY_PLAYBACK_MODE", "SpotifyPlaybackMode")
+        if (-not $sourceSpotifyPlaybackMode) {
+            $sourceSpotifyPlaybackMode = "remote"
+        }
+        $sourceSpiritSyncExternalUrl = Get-DotEnvValue -Path $sourceEnv -Names @("SPIRIT_SYNC_EXTERNAL_URL", "SpiritSyncExternalUrl")
+        if (-not $sourceSpiritSyncExternalUrl) {
+            $sourceSpiritSyncExternalUrl = "http://127.0.0.1:8012/spirit-sync"
+        }
 
         @(
             "PORT=$sourcePort"
             "ClientID=`"$sourceClientId`""
             "ClientSecret=`"$sourceClientSecret`""
             "SpotifyUser=`"$sourceSpotifyUser`""
+            "SpotifyDeviceName=`"$sourceSpotifyDeviceName`""
+            "SpotifyPlaybackMode=`"$sourceSpotifyPlaybackMode`""
+            "SpiritSyncExternalUrl=`"$sourceSpiritSyncExternalUrl`""
         ) | Set-Content -LiteralPath $envPath -Encoding UTF8
 
         Write-Host "Created $envPath from local .env."

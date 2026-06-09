@@ -15,6 +15,7 @@ var bridgeRoot = Path.GetFullPath(
 var envPath = Path.Combine(gameRoot, "spirit-sync.env");
 var bridgePort = ReadPort(envPath);
 var bridgeBaseUrl = $"http://127.0.0.1:{bridgePort}";
+var inGameUrl = ReadInGameUrl(envPath, bridgeBaseUrl);
 
 Console.Title = "Spirit Sync";
 Console.WriteLine("Spirit Sync launcher starting...");
@@ -38,7 +39,7 @@ try
         cancellation.Token
     );
 
-    await WaitForBridgeAsync(http, bridgeBaseUrl, cancellation.Token);
+    await WaitForBridgeAsync(http, bridgeBaseUrl, inGameUrl, cancellation.Token);
     await EnsureSpotifyLoginAsync(http, bridgeBaseUrl, options.SkipAuthWait, cancellation.Token);
 
     Task? cefWatcher = null;
@@ -47,6 +48,7 @@ try
         cefWatcher = WatchCefTargetsAsync(
             http,
             bridgeBaseUrl,
+            inGameUrl,
             options.CefDebugPort,
             cancellation.Token
         );
@@ -57,7 +59,7 @@ try
 
     var runtimePatcher = options.NoRuntimePatch
         ? null
-        : StartRuntimePatcher(bridgeRoot);
+        : StartRuntimePatcher(bridgeRoot, inGameUrl);
 
     await gameProcess.WaitForExitAsync();
     cancellation.Cancel();
@@ -143,6 +145,7 @@ static async Task<Process?> EnsureBridgeAsync(
 static async Task WaitForBridgeAsync(
     HttpClient http,
     string bridgeBaseUrl,
+    string inGameUrl,
     CancellationToken cancellationToken
 )
 {
@@ -152,7 +155,7 @@ static async Task WaitForBridgeAsync(
     {
         if (await IsBridgeRunningAsync(http, bridgeBaseUrl, cancellationToken))
         {
-            Console.WriteLine($"Bridge URL: {bridgeBaseUrl}/spirit-sync");
+            Console.WriteLine($"Bridge URL: {inGameUrl}");
             return;
         }
 
@@ -289,7 +292,7 @@ static Process StartGame(string gameRoot, IReadOnlyList<string> gameArgs, int ce
     ) ?? throw new InvalidOperationException("Could not start Spirit City.");
 }
 
-static Process? StartRuntimePatcher(string bridgeRoot)
+static Process? StartRuntimePatcher(string bridgeRoot, string inGameUrl)
 {
     var patcherPath = new[]
     {
@@ -316,6 +319,7 @@ static Process? StartRuntimePatcher(string bridgeRoot)
         startInfo.ArgumentList.Add("--duration-sec=43200");
         startInfo.ArgumentList.Add("--interval-ms=1500");
         startInfo.ArgumentList.Add("--quiet");
+        startInfo.ArgumentList.Add($"--url={inGameUrl}");
 
         var process = Process.Start(startInfo);
         if (process is not null)
@@ -335,6 +339,7 @@ static Process? StartRuntimePatcher(string bridgeRoot)
 static async Task WatchCefTargetsAsync(
     HttpClient http,
     string bridgeBaseUrl,
+    string inGameUrl,
     int cefDebugPort,
     CancellationToken cancellationToken
 )
@@ -363,7 +368,7 @@ static async Task WatchCefTargetsAsync(
 
                 await NavigateTargetAsync(
                     target,
-                    $"{bridgeBaseUrl}/spirit-sync?launcher={DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}",
+                    WithLauncherCacheBust(inGameUrl),
                     cancellationToken
                 );
                 redirectedTargets[target.Id] = DateTimeOffset.UtcNow;
@@ -377,6 +382,12 @@ static async Task WatchCefTargetsAsync(
 
         await Task.Delay(1500, cancellationToken);
     }
+}
+
+static string WithLauncherCacheBust(string url)
+{
+    var separator = url.Contains('?') ? '&' : '?';
+    return $"{url}{separator}launcher={DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}";
 }
 
 static bool ShouldRedirectTarget(CefTarget target)
@@ -441,9 +452,39 @@ static async Task SendCdpMessageAsync(
 
 static int ReadPort(string envPath)
 {
+    return int.TryParse(ReadEnvValue(envPath, "PORT"), out var port)
+        ? port
+        : DefaultBridgePort;
+}
+
+static string ReadInGameUrl(string envPath, string bridgeBaseUrl)
+{
+    var value =
+        ReadEnvValue(envPath, "SPIRIT_SYNC_EXTERNAL_URL")
+        ?? ReadEnvValue(envPath, "SpiritSyncExternalUrl")
+        ?? ReadEnvValue(envPath, "SPIRIT_SYNC_INGAME_URL")
+        ?? ReadEnvValue(envPath, "SpiritSyncInGameUrl");
+
+    if (string.IsNullOrWhiteSpace(value))
+    {
+        return $"{bridgeBaseUrl}/spirit-sync";
+    }
+
+    if (value.StartsWith("/", StringComparison.Ordinal))
+    {
+        return $"{bridgeBaseUrl}{value}";
+    }
+
+    return Uri.TryCreate(value, UriKind.Absolute, out var uri)
+        ? uri.ToString()
+        : $"{bridgeBaseUrl}/spirit-sync";
+}
+
+static string? ReadEnvValue(string envPath, string name)
+{
     if (!File.Exists(envPath))
     {
-        return DefaultBridgePort;
+        return null;
     }
 
     foreach (var line in File.ReadAllLines(envPath))
@@ -455,16 +496,13 @@ static int ReadPort(string envPath)
         }
 
         var parts = trimmed.Split('=', 2);
-        if (
-            parts[0].Trim().Equals("PORT", StringComparison.OrdinalIgnoreCase)
-            && int.TryParse(Unquote(parts[1].Trim()), out var port)
-        )
+        if (parts[0].Trim().Equals(name, StringComparison.OrdinalIgnoreCase))
         {
-            return port;
+            return Unquote(parts[1].Trim());
         }
     }
 
-    return DefaultBridgePort;
+    return null;
 }
 
 static string? FindNode()

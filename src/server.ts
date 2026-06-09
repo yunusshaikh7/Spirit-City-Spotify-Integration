@@ -32,6 +32,10 @@ app.get(["/spirit-sync", "/ingame"], (_request, response) => {
   response.sendFile(path.join(publicPath, "ingame.html"));
 });
 
+app.get(["/spotify", "/spotify-ui"], (_request, response) => {
+  response.redirect("https://open.spotify.com/");
+});
+
 app.get(["/spirit-sync-setup", "/setup"], (_request, response) => {
   response.redirect("/login");
 });
@@ -65,6 +69,8 @@ app.get("/api/config", (_request, response) => {
     hasClientId: Boolean(config.clientId),
     clientSecretProvided: config.clientSecretProvided,
     spotifyUser: config.spotifyUser,
+    spotifyDeviceName: config.spotifyDeviceName,
+    spotifyPlaybackMode: config.spotifyPlaybackMode,
     redirectUri: config.redirectUri,
     scopes: config.scopes,
     loadedEnvFiles: config.loadedEnvFiles,
@@ -198,8 +204,8 @@ app.post(
 
 app.post(
   "/api/player/play",
-  asyncRoute(async (_request, response) => {
-    const deviceId = await resolvePlaybackDeviceId();
+  asyncRoute(async (request, response) => {
+    const deviceId = await requirePlaybackDeviceId(request.body?.deviceId);
 
     try {
       await spotify.request(
@@ -228,8 +234,8 @@ app.post(
 
 app.post(
   "/api/player/pause",
-  asyncRoute(async (_request, response) => {
-    const deviceId = await resolvePlaybackDeviceId();
+  asyncRoute(async (request, response) => {
+    const deviceId = await requirePlaybackDeviceId(request.body?.deviceId);
     await spotify.request(
       withQuery("/me/player/pause", {
         device_id: deviceId,
@@ -242,8 +248,8 @@ app.post(
 
 app.post(
   "/api/player/next",
-  asyncRoute(async (_request, response) => {
-    const deviceId = await resolvePlaybackDeviceId();
+  asyncRoute(async (request, response) => {
+    const deviceId = await requirePlaybackDeviceId(request.body?.deviceId);
     await spotify.request(
       withQuery("/me/player/next", {
         device_id: deviceId,
@@ -256,8 +262,8 @@ app.post(
 
 app.post(
   "/api/player/previous",
-  asyncRoute(async (_request, response) => {
-    const deviceId = await resolvePlaybackDeviceId();
+  asyncRoute(async (request, response) => {
+    const deviceId = await requirePlaybackDeviceId(request.body?.deviceId);
     await spotify.request(
       withQuery("/me/player/previous", {
         device_id: deviceId,
@@ -272,7 +278,7 @@ app.post(
   "/api/player/shuffle",
   asyncRoute(async (request, response) => {
     const state = Boolean(request.body?.state);
-    const deviceId = await resolvePlaybackDeviceId();
+    const deviceId = await requirePlaybackDeviceId(request.body?.deviceId);
     await spotify.request(
       withQuery("/me/player/shuffle", {
         state,
@@ -293,7 +299,7 @@ app.post(
     const normalizedState =
       state === "track" || state === "context" ? state : "off";
 
-    const deviceId = await resolvePlaybackDeviceId();
+    const deviceId = await requirePlaybackDeviceId(request.body?.deviceId);
     await spotify.request(
       withQuery("/me/player/repeat", {
         state: normalizedState,
@@ -338,6 +344,10 @@ function getErrorStatus(error: Error): number {
     return 401;
   }
 
+  if (error instanceof PlaybackDeviceUnavailableError) {
+    return 409;
+  }
+
   if (error instanceof SpotifyApiError) {
     return error.status >= 400 && error.status < 500 ? error.status : 502;
   }
@@ -353,6 +363,11 @@ type SpotifyPlayback = {
   is_playing?: boolean;
   shuffle_state?: boolean;
   repeat_state?: string;
+  device?: {
+    id?: string | null;
+    name?: string;
+    type?: string;
+  };
   item?: {
     name?: string;
     artists?: Array<{ name?: string }>;
@@ -375,6 +390,15 @@ type SpotifyDevicesResponse = {
   devices?: SpotifyDevice[];
 };
 
+class PlaybackDeviceUnavailableError extends Error {
+  constructor(deviceName: string) {
+    super(
+      `No Spotify playback device is available for ${deviceName}. Check SPOTIFY_PLAYBACK_MODE or open Spotify Desktop.`,
+    );
+    this.name = "PlaybackDeviceUnavailableError";
+  }
+}
+
 function toNowPlaying(playback: SpotifyPlayback | null) {
   const item = playback?.item;
 
@@ -384,6 +408,7 @@ function toNowPlaying(playback: SpotifyPlayback | null) {
       artist: "Spotify",
       album: "",
       albumArt: "",
+      deviceName: playback?.device?.name ?? "",
       isPlaying: false,
       shuffle: false,
       repeat: "off",
@@ -399,15 +424,32 @@ function toNowPlaying(playback: SpotifyPlayback | null) {
         .join(", ") || "Unknown artist",
     album: item.album?.name ?? "",
     albumArt: item.album?.images?.[0]?.url ?? "",
+    deviceName: playback?.device?.name ?? "",
     isPlaying: Boolean(playback?.is_playing),
     shuffle: Boolean(playback?.shuffle_state),
     repeat: playback?.repeat_state ?? "off",
   };
 }
 
-async function resolvePlaybackDeviceId(): Promise<string | null> {
+async function resolvePlaybackDeviceId(
+  preferredDeviceId?: unknown,
+): Promise<string | null> {
+  if (typeof preferredDeviceId === "string" && preferredDeviceId.trim()) {
+    return preferredDeviceId.trim();
+  }
+
   const devices = await getSpotifyDevices();
   return pickPlaybackDevice(devices)?.id ?? null;
+}
+
+async function requirePlaybackDeviceId(preferredDeviceId?: unknown): Promise<string> {
+  const deviceId = await resolvePlaybackDeviceId(preferredDeviceId);
+
+  if (!deviceId) {
+    throw new PlaybackDeviceUnavailableError(config.spotifyDeviceName);
+  }
+
+  return deviceId;
 }
 
 async function getSpotifyDevices(): Promise<SpotifyDevice[]> {
@@ -421,16 +463,39 @@ function pickPlaybackDevice(devices: SpotifyDevice[]): SpotifyDevice | null {
   const usableDevices = devices.filter(
     (device) => device.id && !device.is_restricted,
   );
-
-  return (
+  const spiritSyncDevices = usableDevices.filter((device) =>
+    isConfiguredDevice(device.name),
+  );
+  const spiritSyncDevice =
+    spiritSyncDevices.find((device) => device.is_active) ??
+    spiritSyncDevices[0] ??
+    null;
+  const remoteDevice =
     usableDevices.find(
       (device) => device.type === "Computer" && device.is_active,
     ) ??
     usableDevices.find((device) => device.type === "Computer") ??
     usableDevices.find((device) => device.is_active) ??
     usableDevices[0] ??
-    null
-  );
+    null;
+
+  if (config.spotifyPlaybackMode === "remote") {
+    return remoteDevice;
+  }
+
+  if (config.spotifyPlaybackMode === "auto") {
+    return spiritSyncDevice ?? remoteDevice;
+  }
+
+  return spiritSyncDevice;
+}
+
+function isConfiguredDevice(name?: string): boolean {
+  return normalizeDeviceName(name) === normalizeDeviceName(config.spotifyDeviceName);
+}
+
+function normalizeDeviceName(name?: string): string {
+  return name?.trim().toLocaleLowerCase() ?? "";
 }
 
 function withQuery(

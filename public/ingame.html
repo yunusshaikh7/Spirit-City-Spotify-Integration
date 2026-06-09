@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Spirit Sync - Spotify Integration for Spirit City: Lofi Sessions</title>
-    <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="/styles.css?v=20260609-safe-devices3" />
   </head>
   <body class="ingame">
     <main class="shell">
@@ -21,6 +21,17 @@
             <p id="trackTitle">Nothing playing</p>
             <p id="trackArtist">Connect Spotify to begin</p>
           </div>
+        </div>
+
+        <div class="device-controls">
+          <p class="device-label">Device</p>
+          <div
+            id="deviceOptions"
+            class="device-options"
+            role="group"
+            aria-label="Spotify devices"
+          ></div>
+          <button id="refreshDevicesButton" type="button">Refresh</button>
         </div>
 
         <div class="controls" aria-label="Playback controls">
@@ -50,6 +61,6 @@
       </section>
     </main>
 
-    <script src="/player.js" type="module"></script>
+    <script src="/player.js?v=20260609-safe-devices3" type="module"></script>
   </body>
 </html>

@@ -43,6 +43,8 @@ Important routes:
 GET  /
 GET  /spirit-sync
 GET  /ingame
+GET  /spotify
+GET  /spotify-ui
 GET  /login
 GET  /auth/callback
 GET  /api/config
@@ -59,7 +61,7 @@ POST /api/player/shuffle
 POST /api/player/repeat
 ```
 
-`/api/token` exists for the normal browser/Web Playback SDK page. Do not expose the bridge outside the local machine.
+`/api/token` exists for the browser/Web Playback SDK pages. Do not expose the bridge outside the local machine.
 
 ### Browser Pages
 
@@ -69,7 +71,7 @@ The static UI lives in `public/`.
 - `public/ingame.html` is served at `/spirit-sync` and is shaped for Spirit City's embedded CEF browser.
 - `public/player.js` contains the shared UI/control logic.
 
-Inside the game, do not rely on CEF becoming a Spotify playback device. The in-game page should control the user's existing Spotify desktop app through the local bridge and Spotify Web API.
+Inside the game, playback defaults to `remote`: control Spotify Desktop or another existing Spotify Connect device through the local bridge and Spotify Web API. `SPOTIFY_PLAYBACK_MODE` / `SpotifyPlaybackMode` can still be set to `device` for the experimental Web Playback SDK device or `auto` to try that device before falling back to remote control. Do not rely on Spirit City's embedded CEF reliably becoming a Spotify playback device.
 
 ### Replacement Launcher
 
@@ -95,7 +97,7 @@ Steam still launches `SpiritCity.exe`, but that executable now:
 - opens Spotify login when needed;
 - starts the original game via the backup launcher or shipping executable;
 - starts the runtime patcher;
-- watches CEF debug targets as a fallback and redirects external YouTube pages back to `/spirit-sync`.
+- watches CEF debug targets as a fallback and redirects external YouTube pages back to the configured in-game URL.
 
 If Spirit Sync fails, the launcher should fall back to starting the game without the integration.
 
@@ -104,7 +106,7 @@ If Spirit Sync fails, the launcher should fall back to starting the game without
 `tools/SpiritCityRuntimePatch` scans the running Spirit City process and replaces the first known external music entry in memory:
 
 - visible label becomes `Spirit Sync`;
-- the external URL becomes `http://127.0.0.1:8012/spirit-sync`.
+- the external URL becomes `http://127.0.0.1:8012/spirit-sync` by default.
 
 This is a runtime patch because the current game build stores the Web Music Player list in cooked Unreal data, not in an easy plain JSON file. Keep the patcher conservative and fail-safe. It should only run against the Spirit City process and should tolerate no matches.
 
@@ -167,6 +169,9 @@ SPOTIFY_CLIENT_ID=...
 SPOTIFY_REDIRECT_URI=http://127.0.0.1:8012/auth/callback
 SPOTIFY_CLIENT_SECRET=
 SPOTIFY_USER=...
+SPOTIFY_DEVICE_NAME=Spirit Sync
+SPOTIFY_PLAYBACK_MODE=remote
+SPIRIT_SYNC_EXTERNAL_URL=http://127.0.0.1:8012/spirit-sync
 ```
 
 Compatibility aliases are also accepted:
@@ -175,6 +180,9 @@ Compatibility aliases are also accepted:
 ClientID=...
 ClientSecret=
 SpotifyUser=...
+SpotifyDeviceName=Spirit Sync
+SpotifyPlaybackMode=remote
+SpiritSyncExternalUrl=http://127.0.0.1:8012/spirit-sync
 ```
 
 Client secret is accepted for compatibility, but PKCE means it is not required.
@@ -247,7 +255,7 @@ Before release, scan committed files and the zip for:
 ## Current Limitations
 
 - The external tile currently reuses an existing game thumbnail.
-- The in-game page controls Spotify Desktop through the Web API instead of acting as the playback device.
+- The in-game page defaults to Web API remote control of an existing Spotify device. Acting as its own Spotify Connect device is experimental and depends on Spotify's Web Playback SDK working inside Spirit City's embedded CEF browser.
 - The native bottom song bar is not integrated yet.
 - Runtime menu patching depends on strings observed in the current Steam build.
 

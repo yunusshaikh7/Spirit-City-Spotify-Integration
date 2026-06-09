@@ -13,14 +13,20 @@ export type AppConfig = {
   clientId: string;
   clientSecretProvided: boolean;
   spotifyUser: string;
+  spotifyDeviceName: string;
+  spotifyPlaybackMode: SpotifyPlaybackMode;
   redirectUri: string;
   tokenStorePath: string;
   scopes: string[];
   loadedEnvFiles: string[];
 };
 
+export type SpotifyPlaybackMode = "device" | "remote" | "auto";
+
 const DEFAULT_PORT = 8012;
 const DEFAULT_HOST = "127.0.0.1";
+const DEFAULT_SPOTIFY_DEVICE_NAME = "Spirit Sync";
+const DEFAULT_SPOTIFY_PLAYBACK_MODE: SpotifyPlaybackMode = "remote";
 
 const scopes = [
   "streaming",
@@ -49,6 +55,17 @@ export function loadConfig(): AppConfig {
     process.env.SpotifyUser,
     process.env.SPOTIFY_USERNAME,
   );
+  const spotifyDeviceName =
+    firstDefined(
+      process.env.SPOTIFY_DEVICE_NAME,
+      process.env.SpotifyDeviceName,
+    ) || DEFAULT_SPOTIFY_DEVICE_NAME;
+  const spotifyPlaybackMode = parsePlaybackMode(
+    firstDefined(
+      process.env.SPOTIFY_PLAYBACK_MODE,
+      process.env.SpotifyPlaybackMode,
+    ),
+  );
   const redirectUri =
     process.env.SPOTIFY_REDIRECT_URI?.trim() ??
     `http://${DEFAULT_HOST}:${port}/auth/callback`;
@@ -73,6 +90,8 @@ export function loadConfig(): AppConfig {
     clientId,
     clientSecretProvided: Boolean(clientSecret),
     spotifyUser,
+    spotifyDeviceName,
+    spotifyPlaybackMode,
     redirectUri,
     tokenStorePath,
     scopes,
@@ -113,6 +132,16 @@ function loadEnvFile(envPath: string): void {
 
 function firstDefined(...values: Array<string | undefined>): string {
   return values.map((value) => value?.trim() ?? "").find(Boolean) ?? "";
+}
+
+function parsePlaybackMode(value: string): SpotifyPlaybackMode {
+  const normalized = value.toLocaleLowerCase();
+
+  if (normalized === "device" || normalized === "remote" || normalized === "auto") {
+    return normalized;
+  }
+
+  return DEFAULT_SPOTIFY_PLAYBACK_MODE;
 }
 
 function unique(values: string[]): string[] {

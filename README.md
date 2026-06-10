@@ -1,14 +1,16 @@
 # Spirit Sync - Spotify Integration for Spirit City: Lofi Sessions
 
+> **Work in progress.** Spirit Sync is still being built. Early releases may work for basic testing, but features, install flow, and game integration are incomplete and can change between versions. Expect rough edges and breaking updates.
+
 Spirit Sync is a Spotify integration mod for **Spirit City: Lofi Sessions**.
 
 The target is the actual Spirit City music player: a Spotify option under the game's **Music -> Web Music Player** flow, plus a native Custom-audio proxy for the bottom song bar. The current game build is Unreal Engine with the WebBrowserWidget/CEF runtime, so this project is shaped around a local web bridge and a small runtime patcher.
 
 ## Current Status
 
-This is a functional first release for the Steam Windows version of Spirit City. It installs a replacement launcher, starts a local Spotify bridge, and adds a `Spirit Sync` entry to **Music -> Web Music Player -> External** at runtime.
+This is an early, in-development build for the Steam Windows version of Spirit City. It can install a replacement launcher, start a local Spotify bridge, and add a `Spirit Sync` entry to **Music -> Web Music Player -> External** at runtime, but the integration is not finished yet.
 
-Still rough:
+Known limitations while development continues:
 
 - The tile still uses one of the game's existing thumbnail images.
 - Spotify playback is available in the in-game External web panel. A native Custom-audio proxy can also show Spotify's launch-time title and artist in Spirit City's bottom song bar.

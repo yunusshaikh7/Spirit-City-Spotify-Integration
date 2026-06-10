@@ -18,6 +18,12 @@ var musicSavePath = GetArg(args, "--music-save")
         "SaveGames",
         "SCLS_MusicPlayer.sav"
     );
+var customMusicSavePath = GetArg(args, "--custom-music-save")
+    ?? Path.Combine(
+        Path.GetDirectoryName(musicSavePath) ?? "",
+        "SCLS_CustomMusic.sav"
+    );
+var spotifyProxyFolder = GetArg(args, "--spotify-proxy-folder");
 var nativeSpotifyPauseEnabled = !args.Any(arg =>
     arg.Equals("--no-native-spotify-pause", StringComparison.OrdinalIgnoreCase)
 );
@@ -60,6 +66,12 @@ else if (mode.Equals("watch", StringComparison.OrdinalIgnoreCase))
     var duration = int.TryParse(GetArg(args, "--duration-sec") ?? "", out var parsedDuration)
         ? parsedDuration
         : 120;
+    var spotifyProxyDetector = new SpotifyProxyDetector(customMusicSavePath, spotifyProxyFolder);
+    using var spotifyProxyController = spotifyProxyDetector.IsEnabled
+        ? new SpotifyProxyController(musicSavePath, bridgeBaseUrl, spotifyProxyDetector, quiet)
+        : null;
+    spotifyProxyController?.Start(TimeSpan.FromMilliseconds(500));
+
     var total = WatchSpiritSync(
         handle,
         TimeSpan.FromMilliseconds(interval),
@@ -67,7 +79,7 @@ else if (mode.Equals("watch", StringComparison.OrdinalIgnoreCase))
         quiet,
         replacementUrl,
         nativeSpotifyPauseEnabled
-            ? new NativeMusicMonitor(musicSavePath, bridgeBaseUrl, quiet)
+            ? new NativeMusicMonitor(musicSavePath, bridgeBaseUrl, spotifyProxyDetector, quiet)
             : null
     );
     Console.WriteLine($"totalApplied={total}");
@@ -94,7 +106,7 @@ else if (mode.Equals("refs", StringComparison.OrdinalIgnoreCase))
 }
 else
 {
-    throw new ArgumentException("Usage: SpiritCityRuntimePatch scan [terms...] | dump <hex-address> [length] | refs [terms...] | patch | watch [--interval-ms=1500] [--duration-sec=120] [--quiet] [--bridge-url=http://127.0.0.1:8012] [--music-save=<path>] [--no-native-spotify-pause]");
+    throw new ArgumentException("Usage: SpiritCityRuntimePatch scan [terms...] | dump <hex-address> [length] | refs [terms...] | patch | watch [--interval-ms=1500] [--duration-sec=120] [--quiet] [--bridge-url=http://127.0.0.1:8012] [--music-save=<path>] [--custom-music-save=<path>] [--spotify-proxy-folder=<path>] [--no-native-spotify-pause]");
 }
 
 static void Scan(SafeProcessHandle handle, string[] terms)
@@ -481,19 +493,28 @@ static SafeProcessHandle OpenProcess(ProcessAccess access, bool inheritHandle, i
 
 sealed class NativeMusicMonitor
 {
-    private static readonly byte[] PlayingToken = Encoding.UTF8.GetBytes("Playing");
+    private static readonly TimeSpan SpotifyPauseEnforcementInterval = TimeSpan.FromSeconds(4);
     private readonly string musicSavePath;
     private readonly string bridgeBaseUrl;
+    private readonly SpotifyProxyDetector spotifyProxyDetector;
     private readonly bool quiet;
     private readonly HttpClient http = new();
     private Thread? thread;
     private volatile bool stopping;
     private bool wasPlaying;
+    private DateTimeOffset nextSpotifyPauseEnforcement = DateTimeOffset.MinValue;
+    private SaveSnapshot? lastSaveSnapshot;
 
-    public NativeMusicMonitor(string musicSavePath, string bridgeBaseUrl, bool quiet)
+    public NativeMusicMonitor(
+        string musicSavePath,
+        string bridgeBaseUrl,
+        SpotifyProxyDetector spotifyProxyDetector,
+        bool quiet
+    )
     {
         this.musicSavePath = musicSavePath;
         this.bridgeBaseUrl = bridgeBaseUrl;
+        this.spotifyProxyDetector = spotifyProxyDetector;
         this.quiet = quiet;
         http.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
     }
@@ -523,41 +544,42 @@ sealed class NativeMusicMonitor
 
     public void Poll()
     {
-        var isPlaying = IsNativeMusicPlaying();
-        if (isPlaying && !wasPlaying)
+        var snapshot = NativeMusicSave.Read(musicSavePath);
+        var isPlaying = snapshot.IsPlaying;
+        if (isPlaying && spotifyProxyDetector.IsProxy(snapshot))
         {
-            PauseSpotifyIfPlaying();
+            wasPlaying = isPlaying;
+            lastSaveSnapshot = snapshot;
+            return;
+        }
+
+        var startedPlaying = isPlaying && !wasPlaying;
+        var changedWhilePlaying = isPlaying
+            && lastSaveSnapshot is not null
+            && (
+                snapshot.Length != lastSaveSnapshot.Length
+                || snapshot.LastWriteTimeUtc != lastSaveSnapshot.LastWriteTimeUtc
+            );
+        var enforcementDue = isPlaying
+            && DateTimeOffset.UtcNow >= nextSpotifyPauseEnforcement;
+
+        if (startedPlaying || changedWhilePlaying || enforcementDue)
+        {
+            PauseSpotifyIfPlaying(
+                startedPlaying
+                    ? "native-started"
+                    : changedWhilePlaying
+                        ? "native-save-changed"
+                        : "native-still-playing"
+            );
+            nextSpotifyPauseEnforcement = DateTimeOffset.UtcNow + SpotifyPauseEnforcementInterval;
         }
 
         wasPlaying = isPlaying;
+        lastSaveSnapshot = snapshot;
     }
 
-    private bool IsNativeMusicPlaying()
-    {
-        try
-        {
-            using var stream = new FileStream(
-                musicSavePath,
-                FileMode.Open,
-                FileAccess.Read,
-                FileShare.ReadWrite | FileShare.Delete
-            );
-            if (stream.Length <= 0 || stream.Length > 1024 * 1024)
-            {
-                return false;
-            }
-
-            var buffer = new byte[stream.Length];
-            var bytesRead = stream.Read(buffer, 0, buffer.Length);
-            return Contains(buffer, bytesRead, PlayingToken);
-        }
-        catch
-        {
-            return false;
-        }
-    }
-
-    private void PauseSpotifyIfPlaying()
+    private void PauseSpotifyIfPlaying(string reason)
     {
         try
         {
@@ -575,8 +597,8 @@ sealed class NativeMusicMonitor
             {
                 Console.WriteLine(
                     response.IsSuccessStatusCode
-                        ? "nativeMusicPausedSpotify=true"
-                        : $"nativeMusicPausedSpotify=false status={(int)response.StatusCode}"
+                        ? $"nativeMusicPausedSpotify=true reason={reason}"
+                        : $"nativeMusicPausedSpotify=false reason={reason} status={(int)response.StatusCode}"
                 );
             }
         }
@@ -584,7 +606,7 @@ sealed class NativeMusicMonitor
         {
             if (!quiet)
             {
-                Console.WriteLine($"nativeMusicPausedSpotify=false error={error.Message}");
+                Console.WriteLine($"nativeMusicPausedSpotify=false reason={reason} error={error.Message}");
             }
         }
     }
@@ -607,6 +629,48 @@ sealed class NativeMusicMonitor
             && isPlaying.ValueKind == JsonValueKind.True;
     }
 
+}
+
+static class NativeMusicSave
+{
+    private static readonly byte[] PlayingToken = Encoding.UTF8.GetBytes("Playing");
+
+    public static SaveSnapshot Read(string musicSavePath)
+    {
+        try
+        {
+            var file = new FileInfo(musicSavePath);
+            if (!file.Exists)
+            {
+                return SaveSnapshot.NotPlaying;
+            }
+
+            using var stream = new FileStream(
+                musicSavePath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete
+            );
+            if (stream.Length <= 0 || stream.Length > 1024 * 1024)
+            {
+                return SaveSnapshot.NotPlaying;
+            }
+
+            var buffer = new byte[stream.Length];
+            var bytesRead = stream.Read(buffer, 0, buffer.Length);
+            return new SaveSnapshot(
+                Contains(buffer, bytesRead, PlayingToken),
+                stream.Length,
+                file.LastWriteTimeUtc,
+                TryReadTaggedInt32(buffer, bytesRead, "currentPlaylistID")
+            );
+        }
+        catch
+        {
+            return SaveSnapshot.NotPlaying;
+        }
+    }
+
     private static bool Contains(byte[] buffer, int length, byte[] needle)
     {
         if (needle.Length == 0 || length < needle.Length)
@@ -616,6 +680,369 @@ sealed class NativeMusicMonitor
 
         return buffer.AsSpan(0, length).IndexOf(needle) >= 0;
     }
+
+    private static int? TryReadTaggedInt32(byte[] buffer, int length, string propertyName)
+    {
+        var nameBytes = Encoding.UTF8.GetBytes($"{propertyName}\0");
+        var nameIndex = buffer.AsSpan(0, length).IndexOf(nameBytes);
+        if (nameIndex < 0)
+        {
+            return null;
+        }
+
+        var typeLengthOffset = nameIndex + nameBytes.Length;
+        if (typeLengthOffset + 4 > length)
+        {
+            return null;
+        }
+
+        var typeLength = BitConverter.ToInt32(buffer, typeLengthOffset);
+        if (typeLength <= 0 || typeLength > 128)
+        {
+            return null;
+        }
+
+        var typeOffset = typeLengthOffset + 4;
+        var valueOffset = typeOffset + typeLength + 9;
+        if (valueOffset + 4 > length)
+        {
+            return null;
+        }
+
+        var typeName = Encoding.UTF8.GetString(buffer, typeOffset, typeLength).TrimEnd('\0');
+        if (!typeName.Equals("IntProperty", StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        return BitConverter.ToInt32(buffer, valueOffset);
+    }
+}
+
+static class CustomMusicSave
+{
+    public static string? ReadImportFolderAddress(string customMusicSavePath)
+    {
+        try
+        {
+            if (!File.Exists(customMusicSavePath))
+            {
+                return null;
+            }
+
+            var buffer = File.ReadAllBytes(customMusicSavePath);
+            return TryReadTaggedString(buffer, buffer.Length, "ImportFolderAddress");
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static string? TryReadTaggedString(byte[] buffer, int length, string propertyName)
+    {
+        var nameBytes = Encoding.UTF8.GetBytes($"{propertyName}\0");
+        var nameIndex = buffer.AsSpan(0, length).IndexOf(nameBytes);
+        if (nameIndex < 0)
+        {
+            return null;
+        }
+
+        var typeLengthOffset = nameIndex + nameBytes.Length;
+        if (typeLengthOffset + 4 > length)
+        {
+            return null;
+        }
+
+        var typeLength = BitConverter.ToInt32(buffer, typeLengthOffset);
+        if (typeLength <= 0 || typeLength > 128)
+        {
+            return null;
+        }
+
+        var typeOffset = typeLengthOffset + 4;
+        var valueLengthOffset = typeOffset + typeLength + 9;
+        if (valueLengthOffset + 4 > length)
+        {
+            return null;
+        }
+
+        var typeName = Encoding.UTF8.GetString(buffer, typeOffset, typeLength).TrimEnd('\0');
+        if (!typeName.Equals("StrProperty", StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        var valueLength = BitConverter.ToInt32(buffer, valueLengthOffset);
+        if (valueLength <= 0 || valueLength > 4096)
+        {
+            return null;
+        }
+
+        var valueOffset = valueLengthOffset + 4;
+        if (valueOffset + valueLength > length)
+        {
+            return null;
+        }
+
+        return Encoding.UTF8.GetString(buffer, valueOffset, valueLength)
+            .TrimEnd('\0')
+            .Trim();
+    }
+}
+
+sealed class SpotifyProxyDetector
+{
+    private readonly string customMusicSavePath;
+    private readonly string? spotifyProxyFolder;
+    private string? cachedImportFolder;
+    private DateTime cachedImportFolderTimestamp = DateTime.MinValue;
+
+    public SpotifyProxyDetector(string customMusicSavePath, string? spotifyProxyFolder)
+    {
+        this.customMusicSavePath = customMusicSavePath;
+        this.spotifyProxyFolder = string.IsNullOrWhiteSpace(spotifyProxyFolder)
+            ? null
+            : NormalizePath(spotifyProxyFolder);
+    }
+
+    public bool IsEnabled => spotifyProxyFolder is not null;
+
+    public bool IsProxy(SaveSnapshot snapshot)
+    {
+        return IsEnabled
+            && snapshot.CurrentPlaylistId is >= 200 and < 300
+            && PathsEqual(GetImportFolder(), spotifyProxyFolder);
+    }
+
+    private string? GetImportFolder()
+    {
+        try
+        {
+            var lastWriteTime = File.Exists(customMusicSavePath)
+                ? File.GetLastWriteTimeUtc(customMusicSavePath)
+                : DateTime.MinValue;
+            if (lastWriteTime == cachedImportFolderTimestamp)
+            {
+                return cachedImportFolder;
+            }
+
+            cachedImportFolderTimestamp = lastWriteTime;
+            cachedImportFolder = NormalizePath(CustomMusicSave.ReadImportFolderAddress(customMusicSavePath));
+            return cachedImportFolder;
+        }
+        catch
+        {
+            cachedImportFolderTimestamp = DateTime.MinValue;
+            cachedImportFolder = null;
+            return null;
+        }
+    }
+
+    private static bool PathsEqual(string? left, string? right)
+    {
+        return left is not null
+            && right is not null
+            && left.Equals(right, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string? NormalizePath(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return null;
+        }
+
+        var normalized = path.Replace('/', Path.DirectorySeparatorChar).Trim();
+        try
+        {
+            normalized = Path.GetFullPath(normalized);
+        }
+        catch
+        {
+            return null;
+        }
+
+        return normalized.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+    }
+}
+
+sealed class SpotifyProxyController : IDisposable
+{
+    private static readonly TimeSpan SpotifyPlayEnforcementInterval = TimeSpan.FromSeconds(4);
+    private readonly string musicSavePath;
+    private readonly string bridgeBaseUrl;
+    private readonly SpotifyProxyDetector spotifyProxyDetector;
+    private readonly bool quiet;
+    private readonly HttpClient http = new();
+    private Thread? thread;
+    private volatile bool stopping;
+    private bool? wasProxyPlaying;
+    private DateTimeOffset nextSpotifyPlayEnforcement = DateTimeOffset.MinValue;
+
+    public SpotifyProxyController(
+        string musicSavePath,
+        string bridgeBaseUrl,
+        SpotifyProxyDetector spotifyProxyDetector,
+        bool quiet
+    )
+    {
+        this.musicSavePath = musicSavePath;
+        this.bridgeBaseUrl = bridgeBaseUrl;
+        this.spotifyProxyDetector = spotifyProxyDetector;
+        this.quiet = quiet;
+        http.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+    }
+
+    public void Start(TimeSpan pollInterval)
+    {
+        thread = new Thread(() =>
+        {
+            while (!stopping)
+            {
+                Poll();
+                Thread.Sleep(pollInterval);
+            }
+        })
+        {
+            IsBackground = true,
+            Name = "Spirit Sync Spotify proxy controller",
+        };
+        thread.Start();
+    }
+
+    public void Stop()
+    {
+        stopping = true;
+        thread?.Join(TimeSpan.FromSeconds(1));
+    }
+
+    public void Dispose()
+    {
+        Stop();
+        http.Dispose();
+    }
+
+    private void Poll()
+    {
+        var snapshot = NativeMusicSave.Read(musicSavePath);
+        if (!spotifyProxyDetector.IsProxy(snapshot))
+        {
+            wasProxyPlaying = null;
+            return;
+        }
+
+        var changed = wasProxyPlaying != snapshot.IsPlaying;
+        var enforcementDue = snapshot.IsPlaying
+            && DateTimeOffset.UtcNow >= nextSpotifyPlayEnforcement;
+
+        if (changed || enforcementDue)
+        {
+            if (snapshot.IsPlaying)
+            {
+                PlaySpotifyIfNeeded(changed ? "proxy-play" : "proxy-still-playing");
+                nextSpotifyPlayEnforcement = DateTimeOffset.UtcNow + SpotifyPlayEnforcementInterval;
+            }
+            else
+            {
+                PauseSpotifyIfPlaying("proxy-pause");
+            }
+        }
+
+        wasProxyPlaying = snapshot.IsPlaying;
+    }
+
+    private void PlaySpotifyIfNeeded(string reason)
+    {
+        try
+        {
+            if (IsSpotifyPlaying())
+            {
+                return;
+            }
+
+            using var content = new StringContent("{}", Encoding.UTF8, "application/json");
+            using var response = http.PostAsync($"{bridgeBaseUrl}/api/player/play", content)
+                .GetAwaiter()
+                .GetResult();
+
+            if (!quiet)
+            {
+                Console.WriteLine(
+                    response.IsSuccessStatusCode
+                        ? $"spotifyProxyPlayedSpotify=true reason={reason}"
+                        : $"spotifyProxyPlayedSpotify=false reason={reason} status={(int)response.StatusCode}"
+                );
+            }
+        }
+        catch (Exception error)
+        {
+            if (!quiet)
+            {
+                Console.WriteLine($"spotifyProxyPlayedSpotify=false reason={reason} error={error.Message}");
+            }
+        }
+    }
+
+    private void PauseSpotifyIfPlaying(string reason)
+    {
+        try
+        {
+            if (!IsSpotifyPlaying())
+            {
+                return;
+            }
+
+            using var content = new StringContent("{}", Encoding.UTF8, "application/json");
+            using var response = http.PostAsync($"{bridgeBaseUrl}/api/player/pause", content)
+                .GetAwaiter()
+                .GetResult();
+
+            if (!quiet)
+            {
+                Console.WriteLine(
+                    response.IsSuccessStatusCode
+                        ? $"spotifyProxyPausedSpotify=true reason={reason}"
+                        : $"spotifyProxyPausedSpotify=false reason={reason} status={(int)response.StatusCode}"
+                );
+            }
+        }
+        catch (Exception error)
+        {
+            if (!quiet)
+            {
+                Console.WriteLine($"spotifyProxyPausedSpotify=false reason={reason} error={error.Message}");
+            }
+        }
+    }
+
+    private bool IsSpotifyPlaying()
+    {
+        using var response = http.GetAsync($"{bridgeBaseUrl}/api/status")
+            .GetAwaiter()
+            .GetResult();
+        if (!response.IsSuccessStatusCode)
+        {
+            return false;
+        }
+
+        var json = response.Content.ReadAsStringAsync().GetAwaiter().GetResult();
+        using var document = JsonDocument.Parse(json);
+        return document.RootElement.TryGetProperty("playback", out var playback)
+            && playback.ValueKind == JsonValueKind.Object
+            && playback.TryGetProperty("is_playing", out var isPlaying)
+            && isPlaying.ValueKind == JsonValueKind.True;
+    }
+}
+
+sealed record SaveSnapshot(
+    bool IsPlaying,
+    long Length,
+    DateTime LastWriteTimeUtc,
+    int? CurrentPlaylistId
+)
+{
+    public static readonly SaveSnapshot NotPlaying = new(false, 0, DateTime.MinValue, null);
 }
 
 [Flags]

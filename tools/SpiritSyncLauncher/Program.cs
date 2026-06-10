@@ -42,6 +42,8 @@ try
     await WaitForBridgeAsync(http, bridgeBaseUrl, inGameUrl, cancellation.Token);
     await EnsureSpotifyLoginAsync(http, bridgeBaseUrl, options.SkipAuthWait, cancellation.Token);
 
+    var spotifyProxyFolder = TryPrepareSpotifyProxyAudio(bridgeRoot, bridgeBaseUrl);
+
     Task? cefWatcher = null;
     if (!options.NoCefWatch)
     {
@@ -59,7 +61,7 @@ try
 
     var runtimePatcher = options.NoRuntimePatch
         ? null
-        : StartRuntimePatcher(bridgeRoot, inGameUrl, bridgeBaseUrl);
+        : StartRuntimePatcher(bridgeRoot, inGameUrl, bridgeBaseUrl, spotifyProxyFolder);
 
     await gameProcess.WaitForExitAsync();
     cancellation.Cancel();
@@ -292,7 +294,12 @@ static Process StartGame(string gameRoot, IReadOnlyList<string> gameArgs, int ce
     ) ?? throw new InvalidOperationException("Could not start Spirit City.");
 }
 
-static Process? StartRuntimePatcher(string bridgeRoot, string inGameUrl, string bridgeBaseUrl)
+static Process? StartRuntimePatcher(
+    string bridgeRoot,
+    string inGameUrl,
+    string bridgeBaseUrl,
+    string? spotifyProxyFolder
+)
 {
     var patcherPath = new[]
     {
@@ -321,11 +328,19 @@ static Process? StartRuntimePatcher(string bridgeRoot, string inGameUrl, string 
         startInfo.ArgumentList.Add("--quiet");
         startInfo.ArgumentList.Add($"--url={inGameUrl}");
         startInfo.ArgumentList.Add($"--bridge-url={bridgeBaseUrl}");
+        if (!string.IsNullOrWhiteSpace(spotifyProxyFolder))
+        {
+            startInfo.ArgumentList.Add($"--spotify-proxy-folder={spotifyProxyFolder}");
+        }
 
         var process = Process.Start(startInfo);
         if (process is not null)
         {
             Console.WriteLine($"Started Spirit Sync runtime patcher process {process.Id}.");
+            if (!string.IsNullOrWhiteSpace(spotifyProxyFolder))
+            {
+                Console.WriteLine($"Spotify proxy custom audio folder: {spotifyProxyFolder}");
+            }
         }
 
         return process;
@@ -335,6 +350,352 @@ static Process? StartRuntimePatcher(string bridgeRoot, string inGameUrl, string 
         Console.WriteLine($"Runtime patcher could not start: {error.Message}");
         return null;
     }
+}
+
+static string? TryPrepareSpotifyProxyAudio(string bridgeRoot, string bridgeBaseUrl)
+{
+    try
+    {
+        var spotifyProxyFolder = EnsureSpotifyProxyAudio(bridgeRoot, bridgeBaseUrl);
+        TryRetargetCustomMusicSaveToSpotifyProxy(bridgeRoot, spotifyProxyFolder);
+        return spotifyProxyFolder;
+    }
+    catch (Exception error)
+    {
+        Console.WriteLine($"Spotify native custom audio proxy could not be prepared: {error.Message}");
+        return null;
+    }
+}
+
+static string EnsureSpotifyProxyAudio(string bridgeRoot, string bridgeBaseUrl)
+{
+    var labels = ReadSpotifyProxyLabels(bridgeBaseUrl);
+    var proxyRoot = Path.Combine(bridgeRoot, "CustomAudio", "Spotify");
+    ResetSpotifyProxyRoot(bridgeRoot, proxyRoot);
+
+    var proxyFolder = Path.Combine(proxyRoot, SanitizeFileName(labels.Artist, "Spotify"));
+    Directory.CreateDirectory(proxyFolder);
+
+    var proxyAudioPath = Path.Combine(
+        proxyFolder,
+        $"{SanitizeFileName(labels.Title, "Spotify")}.wav"
+    );
+    if (File.Exists(proxyAudioPath) && new FileInfo(proxyAudioPath).Length > 1024 * 1024)
+    {
+        return proxyFolder;
+    }
+
+    const int sampleRate = 8000;
+    const short channels = 1;
+    const short bitsPerSample = 16;
+    const int durationSeconds = 60 * 60;
+    var bytesPerSample = bitsPerSample / 8;
+    var blockAlign = (short)(channels * bytesPerSample);
+    var byteRate = sampleRate * blockAlign;
+    var dataBytes = sampleRate * durationSeconds * blockAlign;
+
+    using var stream = File.Create(proxyAudioPath);
+    using var writer = new BinaryWriter(stream, Encoding.ASCII);
+    writer.Write(Encoding.ASCII.GetBytes("RIFF"));
+    writer.Write(36 + dataBytes);
+    writer.Write(Encoding.ASCII.GetBytes("WAVE"));
+    writer.Write(Encoding.ASCII.GetBytes("fmt "));
+    writer.Write(16);
+    writer.Write((short)1);
+    writer.Write(channels);
+    writer.Write(sampleRate);
+    writer.Write(byteRate);
+    writer.Write(blockAlign);
+    writer.Write(bitsPerSample);
+    writer.Write(Encoding.ASCII.GetBytes("data"));
+    writer.Write(dataBytes);
+
+    var buffer = new byte[Math.Min(byteRate, dataBytes)];
+    var remaining = dataBytes;
+    while (remaining > 0)
+    {
+        var count = Math.Min(buffer.Length, remaining);
+        writer.Write(buffer, 0, count);
+        remaining -= count;
+    }
+
+    return proxyFolder;
+}
+
+static void ResetSpotifyProxyRoot(string bridgeRoot, string proxyRoot)
+{
+    if (!IsPathUnder(proxyRoot, bridgeRoot))
+    {
+        throw new InvalidOperationException($"Refusing to reset Spotify proxy folder outside bridge root: {proxyRoot}");
+    }
+
+    Directory.CreateDirectory(proxyRoot);
+
+    foreach (var file in Directory.EnumerateFiles(proxyRoot, "*", SearchOption.AllDirectories))
+    {
+        File.SetAttributes(file, FileAttributes.Normal);
+        File.Delete(file);
+    }
+
+    foreach (var directory in Directory
+        .EnumerateDirectories(proxyRoot, "*", SearchOption.AllDirectories)
+        .OrderByDescending(path => path.Length))
+    {
+        Directory.Delete(directory, recursive: false);
+    }
+}
+
+static void TryRetargetCustomMusicSaveToSpotifyProxy(string bridgeRoot, string spotifyProxyFolder)
+{
+    var customMusicSavePath = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "SpiritCity",
+        "Saved",
+        "SaveGames",
+        "SCLS_CustomMusic.sav"
+    );
+    if (!File.Exists(customMusicSavePath))
+    {
+        Console.WriteLine(
+            "Spotify native custom audio folder is ready. Import it once from Spirit City's Custom music tab to use the native bar."
+        );
+        return;
+    }
+
+    var buffer = File.ReadAllBytes(customMusicSavePath);
+    var currentImportFolder = TryReadTaggedString(buffer, "ImportFolderAddress");
+    if (string.IsNullOrWhiteSpace(currentImportFolder))
+    {
+        Console.WriteLine("Custom music save was found, but Spirit Sync could not read its import folder.");
+        return;
+    }
+
+    var proxyRoot = Path.Combine(bridgeRoot, "CustomAudio", "Spotify");
+    if (!IsPathUnder(currentImportFolder, proxyRoot))
+    {
+        Console.WriteLine(
+            "Spotify native custom audio folder is ready. Spirit City's Custom tab is currently pointed at another folder, so Spirit Sync left it alone."
+        );
+        return;
+    }
+
+    var gamePath = ToSpiritCitySavePath(spotifyProxyFolder);
+    if (PathsEqual(currentImportFolder, gamePath))
+    {
+        return;
+    }
+
+    var updated = TryReplaceTaggedString(buffer, "ImportFolderAddress", gamePath);
+    if (updated is null)
+    {
+        Console.WriteLine("Custom music save was found, but Spirit Sync could not update its import folder.");
+        return;
+    }
+
+    var backupPath = customMusicSavePath + ".spirit-sync.bak";
+    if (!File.Exists(backupPath))
+    {
+        File.Copy(customMusicSavePath, backupPath);
+    }
+
+    File.WriteAllBytes(customMusicSavePath, updated);
+    Console.WriteLine("Updated Spirit City's Custom music import folder for the Spotify native proxy.");
+}
+
+static string? TryReadTaggedString(byte[] buffer, string propertyName)
+{
+    var location = TryFindTaggedString(buffer, propertyName);
+    return location is null
+        ? null
+        : Encoding.UTF8.GetString(buffer, location.ValueOffset, location.ValueLength)
+            .TrimEnd('\0')
+            .Trim();
+}
+
+static byte[]? TryReplaceTaggedString(byte[] buffer, string propertyName, string value)
+{
+    var location = TryFindTaggedString(buffer, propertyName);
+    if (location is null)
+    {
+        return null;
+    }
+
+    var newValue = Encoding.UTF8.GetBytes(value.TrimEnd('/', '\\') + "/\0");
+    var newPropertySize = BitConverter.GetBytes(newValue.Length + 4);
+    var newValueLength = BitConverter.GetBytes(newValue.Length);
+    var oldEnd = location.ValueOffset + location.ValueLength;
+
+    using var stream = new MemoryStream(buffer.Length - location.ValueLength + newValue.Length);
+    stream.Write(buffer, 0, location.PropertySizeOffset);
+    stream.Write(newPropertySize, 0, newPropertySize.Length);
+    stream.Write(
+        buffer,
+        location.PropertySizeOffset + sizeof(int),
+        location.ValueLengthOffset - (location.PropertySizeOffset + sizeof(int))
+    );
+    stream.Write(newValueLength, 0, newValueLength.Length);
+    stream.Write(newValue, 0, newValue.Length);
+    stream.Write(buffer, oldEnd, buffer.Length - oldEnd);
+    return stream.ToArray();
+}
+
+static TaggedStringLocation? TryFindTaggedString(byte[] buffer, string propertyName)
+{
+    var nameBytes = Encoding.UTF8.GetBytes($"{propertyName}\0");
+    var nameIndex = buffer.AsSpan().IndexOf(nameBytes);
+    if (nameIndex < 0)
+    {
+        return null;
+    }
+
+    var typeLengthOffset = nameIndex + nameBytes.Length;
+    if (typeLengthOffset + sizeof(int) > buffer.Length)
+    {
+        return null;
+    }
+
+    var typeLength = BitConverter.ToInt32(buffer, typeLengthOffset);
+    if (typeLength <= 0 || typeLength > 128)
+    {
+        return null;
+    }
+
+    var typeOffset = typeLengthOffset + sizeof(int);
+    var propertySizeOffset = typeOffset + typeLength + sizeof(int);
+    var valueLengthOffset = typeOffset + typeLength + 9;
+    if (valueLengthOffset + sizeof(int) > buffer.Length)
+    {
+        return null;
+    }
+
+    var typeName = Encoding.UTF8.GetString(buffer, typeOffset, typeLength).TrimEnd('\0');
+    if (!typeName.Equals("StrProperty", StringComparison.Ordinal))
+    {
+        return null;
+    }
+
+    var valueLength = BitConverter.ToInt32(buffer, valueLengthOffset);
+    if (valueLength <= 0 || valueLength > 4096)
+    {
+        return null;
+    }
+
+    var valueOffset = valueLengthOffset + sizeof(int);
+    if (valueOffset + valueLength > buffer.Length)
+    {
+        return null;
+    }
+
+    return new TaggedStringLocation(
+        propertySizeOffset,
+        valueLengthOffset,
+        valueOffset,
+        valueLength
+    );
+}
+
+static string ToSpiritCitySavePath(string path)
+{
+    return Path.GetFullPath(path).Replace(Path.DirectorySeparatorChar, '/');
+}
+
+static bool IsPathUnder(string path, string parent)
+{
+    var normalizedPath = NormalizePath(path);
+    var normalizedParent = NormalizePath(parent);
+    if (normalizedPath is null || normalizedParent is null)
+    {
+        return false;
+    }
+
+    return normalizedPath.Equals(normalizedParent, StringComparison.OrdinalIgnoreCase)
+        || normalizedPath.StartsWith(
+            normalizedParent + Path.DirectorySeparatorChar,
+            StringComparison.OrdinalIgnoreCase
+        );
+}
+
+static bool PathsEqual(string left, string right)
+{
+    var normalizedLeft = NormalizePath(left);
+    var normalizedRight = NormalizePath(right);
+    return normalizedLeft is not null
+        && normalizedRight is not null
+        && normalizedLeft.Equals(normalizedRight, StringComparison.OrdinalIgnoreCase);
+}
+
+static string? NormalizePath(string path)
+{
+    if (string.IsNullOrWhiteSpace(path))
+    {
+        return null;
+    }
+
+    try
+    {
+        return Path.GetFullPath(path.Replace('/', Path.DirectorySeparatorChar))
+            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+    }
+    catch
+    {
+        return null;
+    }
+}
+
+static SpotifyProxyLabels ReadSpotifyProxyLabels(string bridgeBaseUrl)
+{
+    try
+    {
+        using var http = new HttpClient
+        {
+            Timeout = TimeSpan.FromSeconds(3),
+        };
+        var status = http.GetFromJsonAsync<NowPlayingStatus>(
+                $"{bridgeBaseUrl}/api/now-playing"
+            )
+            .GetAwaiter()
+            .GetResult();
+        var playback = status?.Playback;
+        if (
+            status?.Connected == true
+            && playback is not null
+            && !string.IsNullOrWhiteSpace(playback.Title)
+            && !playback.Title.Equals("Nothing playing", StringComparison.OrdinalIgnoreCase)
+        )
+        {
+            return new SpotifyProxyLabels(
+                playback.Title.Trim(),
+                string.IsNullOrWhiteSpace(playback.Artist) ? "Spotify" : playback.Artist.Trim()
+            );
+        }
+    }
+    catch
+    {
+        // Keep game launch fail-safe; the proxy can use generic labels until Spotify is active.
+    }
+
+    return new SpotifyProxyLabels("Spotify", "Spirit Sync");
+}
+
+static string SanitizeFileName(string value, string fallback)
+{
+    var invalid = Path.GetInvalidFileNameChars().ToHashSet();
+    var builder = new StringBuilder(value.Length);
+    foreach (var character in value.Trim())
+    {
+        builder.Append(invalid.Contains(character) ? ' ' : character);
+    }
+
+    var sanitized = string.Join(" ", builder.ToString().Split(
+        ' ',
+        StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries
+    ));
+    if (string.IsNullOrWhiteSpace(sanitized))
+    {
+        sanitized = fallback;
+    }
+
+    return sanitized.Length > 80 ? sanitized[..80].TrimEnd() : sanitized;
 }
 
 static async Task WatchCefTargetsAsync(
@@ -565,7 +926,22 @@ sealed record BridgeConfig(
 );
 
 sealed record NowPlayingStatus(
-    [property: JsonPropertyName("connected")] bool Connected
+    [property: JsonPropertyName("connected")] bool Connected,
+    [property: JsonPropertyName("playback")] NowPlayingPlayback? Playback
+);
+
+sealed record NowPlayingPlayback(
+    [property: JsonPropertyName("title")] string Title,
+    [property: JsonPropertyName("artist")] string Artist
+);
+
+sealed record SpotifyProxyLabels(string Title, string Artist);
+
+sealed record TaggedStringLocation(
+    int PropertySizeOffset,
+    int ValueLengthOffset,
+    int ValueOffset,
+    int ValueLength
 );
 
 sealed record CefTarget(

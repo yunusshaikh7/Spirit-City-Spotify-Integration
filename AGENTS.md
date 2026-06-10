@@ -6,7 +6,7 @@ This file is for automated contributors and future maintainers working on Spirit
 
 Spirit Sync is a Spotify integration for **Spirit City: Lofi Sessions** on Steam for Windows.
 
-The goal is not just to run a standalone browser Spotify controller. The integration must appear inside Spirit City's own **Music -> Web Music Player -> External** flow. In the current Steam build, external web players do not appear in the game's bottom native song bar; they play through the external web panel. Spirit City's own external YouTube entries behave the same way, so treat that as the baseline until the native audio/player internals are better understood.
+The goal is not just to run a standalone browser Spotify controller. The integration must appear inside Spirit City's own **Music -> Web Music Player -> External** flow, and native bottom-bar integration should use Spirit City's **Music -> Custom** audio path when possible. In the current Steam build, external web players do not appear in the game's bottom native song bar; they play through the external web panel. Spirit City's own external YouTube entries behave the same way, so treat External as the reliable browser-control baseline and Custom audio as the native-player proxy path.
 
 Use this product name in public files and releases:
 
@@ -96,6 +96,8 @@ Steam still launches `SpiritCity.exe`, but that executable now:
 - waits for the bridge to answer;
 - opens Spotify login when needed;
 - starts the original game via the backup launcher or shipping executable;
+- generates a silent Spotify-labeled Custom audio proxy under `<Spirit City>\SpiritSync\CustomAudio\Spotify\<artist>`;
+- retargets Spirit City's Custom import save to the newest generated proxy folder only when that save already points inside the Spirit Sync-owned proxy area;
 - starts the runtime patcher;
 - watches CEF debug targets as a fallback and redirects external YouTube pages back to the configured in-game URL.
 
@@ -114,7 +116,7 @@ In `watch` mode it also monitors:
 %LOCALAPPDATA%\SpiritCity\Saved\SaveGames\SCLS_MusicPlayer.sav
 ```
 
-When the native music player save transitions into `Playing`, it asks the local bridge to pause Spotify. This is intentionally one-way: built-in Spirit City lists should stop Spotify, but native bottom-bar controls are not fully remapped to Spotify yet.
+When a normal built-in native music list is playing, it asks the local bridge to pause Spotify. If the active native playlist is the configured Spirit Sync Custom-audio proxy folder, the patcher does the inverse: native play resumes Spotify and native pause pauses Spotify. Native next/previous/shuffle/repeat are not fully remapped yet.
 
 This is a runtime patch because the current game build stores the Web Music Player list in cooked Unreal data, not in an easy plain JSON file. Keep the patcher conservative and fail-safe. It should only run against the Spirit City process and should tolerate no matches.
 
@@ -250,8 +252,10 @@ Use this checklist before publishing a functional release:
 7. Verify the game root contains `SpiritSync`, `spirit-sync.env`, replacement `SpiritCity.exe`, and `SpiritCityBackup.exe`.
 8. Start the installed bridge or launch the game, then verify `http://127.0.0.1:8012/spirit-sync` returns the in-game page.
 9. Open **Music -> Web Music Player -> External** in game and verify the `Spirit Sync` entry appears.
-10. Run `SpiritSyncUninstaller.exe` and verify the original `SpiritCity.exe` is restored.
-11. Reinstall afterward if the local machine should remain patched for continued testing.
+10. Open **Music -> Custom**, import the generated `SpiritSync\CustomAudio\Spotify\<artist>` folder if needed, and verify the native bottom bar shows the generated Spotify song title and folder/artist line.
+11. Verify the native Custom proxy play/pause maps to Spotify play/pause, and that starting a normal built-in Spirit City list pauses Spotify.
+12. Run `SpiritSyncUninstaller.exe` and verify the original `SpiritCity.exe` is restored.
+13. Reinstall afterward if the local machine should remain patched for continued testing.
 
 Before release, scan committed files and the zip for:
 
@@ -264,8 +268,9 @@ Before release, scan committed files and the zip for:
 
 - The external tile currently reuses an existing game thumbnail.
 - The in-game page defaults to Web API remote control of an existing Spotify device. Acting as its own Spotify Connect device is experimental and depends on Spotify's Web Playback SDK working inside Spirit City's embedded CEF browser.
-- The native bottom song bar is not integrated yet.
+- The native bottom song bar is integrated through Spirit City's Custom audio system, not by replacing the game's internal Spotify-free music data. Spotify metadata is generated from the currently playing track at launch; live title changes while Spotify advances are not fully native yet.
 - Native built-in list playback pauses Spotify through the runtime patcher's save-file monitor.
+- Native Custom proxy playback maps play/pause to Spotify. Native next/previous/shuffle/repeat are not fully remapped to Spotify yet.
 - Runtime menu patching depends on strings observed in the current Steam build.
 
 ## Useful Investigation Tools

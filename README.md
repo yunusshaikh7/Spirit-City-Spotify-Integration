@@ -2,7 +2,7 @@
 
 Spirit Sync is a Spotify integration mod for **Spirit City: Lofi Sessions**.
 
-The target is the actual Spirit City music player: a Spotify option under the game's **Music -> Web Music Player** flow. The current game build is Unreal Engine with the WebBrowserWidget/CEF runtime, so this project is shaped around a local web bridge that the in-game browser can load.
+The target is the actual Spirit City music player: a Spotify option under the game's **Music -> Web Music Player** flow, plus a native Custom-audio proxy for the bottom song bar. The current game build is Unreal Engine with the WebBrowserWidget/CEF runtime, so this project is shaped around a local web bridge and a small runtime patcher.
 
 ## Current Status
 
@@ -11,9 +11,9 @@ This is a functional first release for the Steam Windows version of Spirit City.
 Still rough:
 
 - The tile still uses one of the game's existing thumbnail images.
-- Spotify playback appears in the in-game External web panel, not the bottom native song bar. Spirit City's own YouTube External players behave the same way.
+- Spotify playback is available in the in-game External web panel. A native Custom-audio proxy can also show Spotify's launch-time title and artist in Spirit City's bottom song bar.
 - The in-game page defaults to PC/existing-device remote control; separate-device mode is experimental.
-- Starting a built-in Spirit City music-list track pauses Spotify.
+- Starting a built-in Spirit City music-list track pauses Spotify. Starting the Spirit Sync Custom-audio proxy track resumes Spotify.
 - The installer and uninstaller are unsigned Windows EXEs included in the release zip.
 
 ## Requirements
@@ -77,6 +77,14 @@ After login, open **Music -> Web Music Player -> External** in game and choose `
 
 Use the in-page device selector to choose `Spirit Sync`, Spotify Desktop, or another available Spotify Connect device.
 
+For native bottom-bar text and play/pause, use Spirit City's **Music -> Custom** tab and import the generated Spotify proxy folder:
+
+```text
+<Spirit City>\SpiritSync\CustomAudio\Spotify\<artist>
+```
+
+Spirit City uses the audio file name as the song title and the folder name as the second line, so Spirit Sync generates a silent proxy WAV from Spotify's current title and artist at launch. After the Custom import points inside `SpiritSync\CustomAudio\Spotify`, future launches can retarget it to the latest generated artist folder automatically.
+
 ## Uninstall
 
 Run this from the extracted release folder:
@@ -130,7 +138,8 @@ Implementation notes for automated contributors live in [AGENTS.md](AGENTS.md).
 - Playback API for devices, play, pause, next, previous, shuffle, repeat, transfer, status, and now-playing metadata.
 - Replacement launcher project that can mirror the old mod's `SpiritCity.exe` / `SpiritCityBackup.exe` install layout.
 - Runtime patcher that renames the first Web Music Player entry to `Spirit Sync` and points it at the local in-game Spotify page.
-- Runtime monitor that pauses Spotify when Spirit City's native music-player save enters `Playing`.
+- Runtime monitor that pauses Spotify when a normal Spirit City native music-list track is playing.
+- Native Custom-audio proxy support: Spirit Sync generates a silent Spotify-labeled WAV and maps that Custom track's native play/pause state to Spotify play/pause.
 - Legacy `spirit-sync.env` compatibility for the old README's `ClientID`, `ClientSecret`, and `SpotifyUser` names.
 
 ## Spotify App Setup

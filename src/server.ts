@@ -313,6 +313,29 @@ app.post(
   }),
 );
 
+app.post(
+  "/api/player/volume",
+  asyncRoute(async (request, response) => {
+    const raw = Number(request.body?.volume);
+
+    if (!Number.isFinite(raw)) {
+      response.status(400).json({ error: "volume (0-100) is required." });
+      return;
+    }
+
+    const volume = Math.max(0, Math.min(100, Math.round(raw)));
+    const deviceId = await requirePlaybackDeviceId(request.body?.deviceId);
+    await spotify.request(
+      withQuery("/me/player/volume", {
+        volume_percent: volume,
+        device_id: deviceId,
+      }),
+      { method: "PUT" },
+    );
+    response.json({ ok: true, volume, deviceId });
+  }),
+);
+
 app.use(
   (
     error: Error,

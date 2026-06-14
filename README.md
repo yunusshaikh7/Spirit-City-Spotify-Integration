@@ -13,9 +13,9 @@ This is an early, in-development build for the Steam Windows version of Spirit C
 Known limitations while development continues:
 
 - The tile still uses one of the game's existing thumbnail images.
-- Spotify playback is available in the in-game External web panel, which shows live track info. A native Custom-audio proxy also shows Spotify's title and artist in Spirit City's bottom song bar and maps native play/pause, **volume, and shuffle** to Spotify.
-- The native bottom bar shows the track that was current **when the game launched**. It does not update live as Spotify advances tracks (the game caches the bar's rendered text and only refreshes it on its own track change). For the live, always-current view, use the in-game External -> Spirit Sync page.
-- Native **next/previous and repeat/loop** on the bottom bar are not mapped to Spotify: the game's music save does not record a track index or repeat state, so they cannot be observed without fragile memory hacks. Use the External -> Spirit Sync page for skip and repeat. (Volume and shuffle DO work from the native bar.)
+- Spotify playback is available in the in-game External web panel, which shows live track info. A native Custom-audio proxy also drives Spotify from Spirit City's bottom song bar: **play/pause, next, previous, shuffle, repeat, and volume** all control Spotify.
+- The native proxy playlist is a set of silent "Spotify NN" tracks (one shared audio file via hard links). The bar shows the slot name ("Spotify 03"), not the live Spotify title, because the game caches the bar's rendered text and the title can't be updated live. For the live, always-current track view, use the in-game External -> Spirit Sync page.
+- Native next/previous map to Spotify skip by detecting which proxy track the game is on. This is best-effort and works best with the bar's **loop** turned on (so skipping wraps around the slots). As with Spotify itself, pressing previous mid-track restarts the current track before stepping back.
 - The in-game page defaults to PC/existing-device remote control; separate-device mode is experimental.
 - Starting a built-in Spirit City music-list track pauses Spotify. Starting the Spirit Sync Custom-audio proxy track resumes Spotify.
 - The installer and uninstaller are unsigned Windows EXEs included in the release zip.
@@ -143,7 +143,7 @@ Implementation notes for automated contributors live in [AGENTS.md](AGENTS.md).
 - Replacement launcher project that can mirror the old mod's `SpiritCity.exe` / `SpiritCityBackup.exe` install layout.
 - Runtime patcher that renames the first Web Music Player entry to `Spirit Sync` and points it at the local in-game Spotify page.
 - Runtime monitor that pauses Spotify when a normal Spirit City native music-list track is playing.
-- Native Custom-audio proxy support: Spirit Sync generates a silent Spotify-labeled WAV and maps that Custom track's native play/pause, volume slider, and shuffle toggle to Spotify.
+- Native Custom-audio proxy support: Spirit Sync generates a multi-track silent proxy playlist (hard-linked, so ~1x one WAV on disk) and maps the native bar's play/pause, next, previous, shuffle, repeat/loop, and volume to Spotify. Next/previous are detected from process memory by which proxy track the game is playing.
 - Legacy `spirit-sync.env` compatibility for the old README's `ClientID`, `ClientSecret`, and `SpotifyUser` names.
 
 ## Spotify App Setup

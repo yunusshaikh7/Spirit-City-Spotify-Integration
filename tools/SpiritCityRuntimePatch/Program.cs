@@ -27,6 +27,9 @@ var spotifyProxyFolder = GetArg(args, "--spotify-proxy-folder");
 var nativeSpotifyPauseEnabled = !args.Any(arg =>
     arg.Equals("--no-native-spotify-pause", StringComparison.OrdinalIgnoreCase)
 );
+var nativeTrackSkipEnabled = !args.Any(arg =>
+    arg.Equals("--no-native-track-skip", StringComparison.OrdinalIgnoreCase)
+);
 var process = Process.GetProcessesByName(processName).FirstOrDefault()
     ?? throw new InvalidOperationException($"Process not found: {processName}");
 
@@ -71,6 +74,22 @@ else if (mode.Equals("watch", StringComparison.OrdinalIgnoreCase))
         ? new SpotifyProxyController(musicSavePath, bridgeBaseUrl, spotifyProxyDetector, quiet)
         : null;
     spotifyProxyController?.Start(TimeSpan.FromMilliseconds(500));
+
+    using var nativeTrackController =
+        spotifyProxyDetector.IsEnabled && nativeTrackSkipEnabled && spotifyProxyFolder is not null
+            ? new NativeTrackController(
+                process.Id,
+                musicSavePath,
+                bridgeBaseUrl,
+                spotifyProxyDetector,
+                spotifyProxyFolder,
+                quiet
+            )
+            : null;
+    if (nativeTrackController?.IsUsable == true)
+    {
+        nativeTrackController.Start(TimeSpan.FromMilliseconds(1500));
+    }
 
     var total = WatchSpiritSync(
         handle,
@@ -646,6 +665,9 @@ static class NativeMusicSave
     // mapped from the native bar.)
     private static readonly byte[] ShuffleToken = Encoding.UTF8.GetBytes("isShuffle");
 
+    // Repeat/loop uses the same conditional serialization: "isLoop" is written only while on.
+    private static readonly byte[] LoopToken = Encoding.UTF8.GetBytes("isLoop");
+
     public static SaveSnapshot Read(string musicSavePath)
     {
         try
@@ -675,7 +697,8 @@ static class NativeMusicSave
                 file.LastWriteTimeUtc,
                 TryReadTaggedInt32(buffer, bytesRead, "currentPlaylistID"),
                 TryReadTaggedDouble(buffer, bytesRead, "currentVolume"),
-                Contains(buffer, bytesRead, ShuffleToken)
+                Contains(buffer, bytesRead, ShuffleToken),
+                Contains(buffer, bytesRead, LoopToken)
             );
         }
         catch
@@ -934,6 +957,7 @@ sealed class SpotifyProxyController : IDisposable
     // proxy never clobbers Spotify's existing volume/shuffle. Only later changes are forwarded.
     private int? lastVolumePercent;
     private bool? lastShuffle;
+    private bool? lastLoop;
 
     public SpotifyProxyController(
         string musicSavePath,
@@ -986,11 +1010,13 @@ sealed class SpotifyProxyController : IDisposable
             wasProxyPlaying = null;
             lastVolumePercent = null;
             lastShuffle = null;
+            lastLoop = null;
             return;
         }
 
         SyncVolume(snapshot);
         SyncShuffle(snapshot);
+        SyncRepeat(snapshot);
 
         var changed = wasProxyPlaying != snapshot.IsPlaying;
         var enforcementDue = snapshot.IsPlaying
@@ -1124,6 +1150,29 @@ sealed class SpotifyProxyController : IDisposable
         );
     }
 
+    private void SyncRepeat(SaveSnapshot snapshot)
+    {
+        if (lastLoop is null)
+        {
+            lastLoop = snapshot.IsLoop; // baseline; do not push on first sight
+            return;
+        }
+
+        if (snapshot.IsLoop == lastLoop)
+        {
+            return;
+        }
+
+        lastLoop = snapshot.IsLoop;
+        // Native loop is a single on/off; map on -> repeat the playlist, off -> no repeat.
+        var state = snapshot.IsLoop ? "context" : "off";
+        PostPlayerCommand(
+            "/api/player/repeat",
+            $"{{\"state\":\"{state}\"}}",
+            $"spotifyProxyRepeat={state}"
+        );
+    }
+
     private void PostPlayerCommand(string path, string jsonBody, string label)
     {
         try
@@ -1170,16 +1219,314 @@ sealed class SpotifyProxyController : IDisposable
     }
 }
 
+// Maps native next/previous on the Custom proxy bar to Spotify. The save records no track index,
+// so instead the proxy is a multi-track playlist of identically-silent tracks with uniform names;
+// the game references the CURRENT track's title far more often in memory than the others, so the
+// title with the most occurrences identifies the current index. A change in that index means the
+// user pressed native next/previous, which we forward to Spotify. See "Verified Native Save
+// Behavior" in AGENTS.md. This is best-effort and fail-safe: ambiguous scans are ignored.
+sealed class NativeTrackController : IDisposable
+{
+    private readonly int processId;
+    private readonly string musicSavePath;
+    private readonly string bridgeBaseUrl;
+    private readonly SpotifyProxyDetector detector;
+    private readonly bool quiet;
+    private readonly HttpClient http = new();
+    private readonly int trackCount; // tracks in game order (= file creation order)
+    private readonly byte[][] displayNeedles; // UTF-16 file name without extension + null
+    private readonly byte[][] fileNeedles; // UTF-16 full file name (with .wav) + null
+    private Thread? thread;
+    private volatile bool stopping;
+    private int? lastIndex;
+
+    public NativeTrackController(
+        int processId,
+        string musicSavePath,
+        string bridgeBaseUrl,
+        SpotifyProxyDetector detector,
+        string proxyFolder,
+        bool quiet
+    )
+    {
+        this.processId = processId;
+        this.musicSavePath = musicSavePath;
+        this.bridgeBaseUrl = bridgeBaseUrl;
+        this.detector = detector;
+        this.quiet = quiet;
+        http.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+
+        // The game references the current track by both its display name and its file name; we
+        // count both so the current track stands out from the others even when the music panel is
+        // closed (only the now-playing bar copy remains).
+        var fileNames = LoadTrackFileNames(proxyFolder);
+        trackCount = fileNames.Length;
+        displayNeedles = fileNames
+            .Select(name => Encoding.Unicode.GetBytes(Path.GetFileNameWithoutExtension(name) + "\0"))
+            .ToArray();
+        fileNeedles = fileNames
+            .Select(name => Encoding.Unicode.GetBytes(name + "\0"))
+            .ToArray();
+    }
+
+    // Needs at least two tracks for next/previous to move an index.
+    public bool IsUsable => trackCount >= 2;
+
+    public void Start(TimeSpan pollInterval)
+    {
+        thread = new Thread(() =>
+        {
+            while (!stopping)
+            {
+                try
+                {
+                    Poll();
+                }
+                catch
+                {
+                    // Best-effort; never let a scan failure crash the patcher.
+                }
+
+                Thread.Sleep(pollInterval);
+            }
+        })
+        {
+            IsBackground = true,
+            Name = "Spirit Sync native track controller",
+        };
+        thread.Start();
+    }
+
+    public void Stop()
+    {
+        stopping = true;
+        thread?.Join(TimeSpan.FromSeconds(2));
+    }
+
+    public void Dispose()
+    {
+        Stop();
+        http.Dispose();
+    }
+
+    private static string[] LoadTrackFileNames(string? proxyFolder)
+    {
+        if (string.IsNullOrWhiteSpace(proxyFolder))
+        {
+            return Array.Empty<string>();
+        }
+
+        try
+        {
+            // Order by creation time to match how the game lists custom tracks, so a +1 step in
+            // this list corresponds to native "next".
+            return new DirectoryInfo(proxyFolder)
+                .GetFiles("*.wav")
+                .OrderBy(file => file.CreationTimeUtc)
+                .ThenBy(file => file.Name, StringComparer.Ordinal)
+                .Select(file => file.Name)
+                .ToArray();
+        }
+        catch
+        {
+            return Array.Empty<string>();
+        }
+    }
+
+    private void Poll()
+    {
+        var snapshot = NativeMusicSave.Read(musicSavePath);
+        if (!detector.IsProxy(snapshot))
+        {
+            lastIndex = null; // re-baseline next time the proxy becomes active
+            return;
+        }
+
+        var index = DetectCurrentIndex();
+        if (index < 0)
+        {
+            return; // ambiguous scan; keep the last known index
+        }
+
+        if (lastIndex is null)
+        {
+            lastIndex = index; // baseline; do not skip on first detection
+            return;
+        }
+
+        if (index == lastIndex)
+        {
+            return;
+        }
+
+        var previous = lastIndex.Value;
+        lastIndex = index;
+
+        var count = trackCount;
+        var forward = ((index - previous) % count + count) % count; // steps moving forward on the ring
+        bool next;
+        if (snapshot.IsShuffle)
+        {
+            next = true; // shuffle picks a random track; map any change to a single Spotify next
+        }
+        else if (forward == 1)
+        {
+            next = true;
+        }
+        else if (forward == count - 1)
+        {
+            next = false; // moved back one (wrapped around the ring)
+        }
+        else
+        {
+            next = forward <= count / 2; // unusual multi-step jump: take the nearest direction
+        }
+
+        PostSkip(next, $"nativeIndex {previous}->{index}");
+    }
+
+    private int DetectCurrentIndex()
+    {
+        using var handle = Native.OpenProcess(
+            ProcessAccess.QueryInformation | ProcessAccess.VirtualMemoryRead,
+            false,
+            processId
+        );
+        if (handle.IsInvalid)
+        {
+            return -1;
+        }
+
+        var counts = new long[trackCount];
+        var address = IntPtr.Zero;
+        var infoSize = (nuint)Marshal.SizeOf<MEMORY_BASIC_INFORMATION>();
+        while (Native.VirtualQueryEx(handle, address, out var info, infoSize) != 0)
+        {
+            var regionSize = checked((long)info.RegionSize);
+            var nextAddress = info.BaseAddress.ToInt64() + regionSize;
+            if (nextAddress <= address.ToInt64())
+            {
+                break;
+            }
+
+            address = new IntPtr(nextAddress);
+
+            // The track-title strings are runtime allocations in private committed heap. Limiting
+            // the scan to that keeps it far lighter than a full-process scan.
+            if (info.State != MemoryState.Commit || info.Type != MemoryType.Private)
+            {
+                continue;
+            }
+
+            var protect = info.Protect & ~MemoryProtect.Guard;
+            var readable = protect is MemoryProtect.ReadWrite
+                or MemoryProtect.ReadOnly
+                or MemoryProtect.WriteCopy
+                or MemoryProtect.ExecuteRead
+                or MemoryProtect.ExecuteReadWrite
+                or MemoryProtect.ExecuteWriteCopy;
+            if (!readable || regionSize <= 0 || regionSize > 128 * 1024 * 1024)
+            {
+                continue;
+            }
+
+            var buffer = new byte[(int)regionSize];
+            if (!Native.ReadProcessMemory(handle, info.BaseAddress, buffer, buffer.Length, out var read) || read == 0)
+            {
+                continue;
+            }
+
+            for (var i = 0; i < trackCount; i += 1)
+            {
+                counts[i] += CountOccurrences(buffer, read, displayNeedles[i])
+                    + CountOccurrences(buffer, read, fileNeedles[i]);
+            }
+        }
+
+        // The current track's title appears the most; require a clear margin over the runner-up so
+        // a transient or tied scan does not produce a phantom skip.
+        var best = -1;
+        long bestCount = 0;
+        long secondCount = 0;
+        for (var i = 0; i < counts.Length; i += 1)
+        {
+            if (counts[i] > bestCount)
+            {
+                secondCount = bestCount;
+                bestCount = counts[i];
+                best = i;
+            }
+            else if (counts[i] > secondCount)
+            {
+                secondCount = counts[i];
+            }
+        }
+
+        return best >= 0 && bestCount >= secondCount + 2 ? best : -1;
+    }
+
+    private static long CountOccurrences(byte[] buffer, int length, byte[] needle)
+    {
+        if (needle.Length == 0)
+        {
+            return 0;
+        }
+
+        long count = 0;
+        var offset = 0;
+        var span = buffer.AsSpan(0, length);
+        while (offset <= span.Length - needle.Length)
+        {
+            var index = span[offset..].IndexOf(needle);
+            if (index < 0)
+            {
+                break;
+            }
+
+            count += 1;
+            offset += index + needle.Length;
+        }
+
+        return count;
+    }
+
+    private void PostSkip(bool next, string reason)
+    {
+        var path = next ? "/api/player/next" : "/api/player/previous";
+        try
+        {
+            using var content = new StringContent("{}", Encoding.UTF8, "application/json");
+            using var response = http.PostAsync($"{bridgeBaseUrl}{path}", content)
+                .GetAwaiter()
+                .GetResult();
+            if (!quiet)
+            {
+                Console.WriteLine(
+                    $"spotifyProxySkip={(next ? "next" : "previous")} reason={reason} ok={response.IsSuccessStatusCode}"
+                );
+            }
+        }
+        catch (Exception error)
+        {
+            if (!quiet)
+            {
+                Console.WriteLine($"spotifyProxySkip={(next ? "next" : "previous")} reason={reason} error={error.Message}");
+            }
+        }
+    }
+}
+
 sealed record SaveSnapshot(
     bool IsPlaying,
     long Length,
     DateTime LastWriteTimeUtc,
     int? CurrentPlaylistId,
     double? Volume,
-    bool IsShuffle
+    bool IsShuffle,
+    bool IsLoop
 )
 {
-    public static readonly SaveSnapshot NotPlaying = new(false, 0, DateTime.MinValue, null, null, false);
+    public static readonly SaveSnapshot NotPlaying = new(false, 0, DateTime.MinValue, null, null, false, false);
 }
 
 [Flags]

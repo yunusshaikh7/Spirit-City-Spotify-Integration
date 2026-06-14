@@ -13,7 +13,9 @@ This is an early, in-development build for the Steam Windows version of Spirit C
 Known limitations while development continues:
 
 - The tile still uses one of the game's existing thumbnail images.
-- Spotify playback is available in the in-game External web panel. A native Custom-audio proxy can also show Spotify's launch-time title and artist in Spirit City's bottom song bar.
+- Spotify playback is available in the in-game External web panel, which shows live track info. A native Custom-audio proxy also shows Spotify's title and artist in Spirit City's bottom song bar and maps native play/pause to Spotify.
+- The native bottom bar shows the track that was current **when the game launched**. It does not update live as Spotify advances tracks (the game caches the bar's rendered text and only refreshes it on its own track change). For the live, always-current view, use the in-game External -> Spirit Sync page.
+- Native next/previous/shuffle/repeat on the bottom bar are not mapped to Spotify. The game's music save does not record a track index or those toggles, so they cannot be observed. Use the External -> Spirit Sync page for skip/shuffle/repeat.
 - The in-game page defaults to PC/existing-device remote control; separate-device mode is experimental.
 - Starting a built-in Spirit City music-list track pauses Spotify. Starting the Spirit Sync Custom-audio proxy track resumes Spotify.
 - The installer and uninstaller are unsigned Windows EXEs included in the release zip.
@@ -79,13 +81,13 @@ After login, open **Music -> Web Music Player -> External** in game and choose `
 
 Use the in-page device selector to choose `Spirit Sync`, Spotify Desktop, or another available Spotify Connect device.
 
-For native bottom-bar text and play/pause, use Spirit City's **Music -> Custom** tab and import the generated Spotify proxy folder:
+For native bottom-bar text and play/pause, Spirit Sync uses Spirit City's **Music -> Custom** path. Spirit City reads the import folder on every launch, so Spirit Sync generates a silent proxy WAV from Spotify's current title and artist and points the Custom import at it:
 
 ```text
 <Spirit City>\SpiritSync\CustomAudio\Spotify\<artist>
 ```
 
-Spirit City uses the audio file name as the song title and the folder name as the second line, so Spirit Sync generates a silent proxy WAV from Spotify's current title and artist at launch. After the Custom import points inside `SpiritSync\CustomAudio\Spotify`, future launches can retarget it to the latest generated artist folder automatically.
+Spirit City uses the audio file name as the song title and the folder name as the second line. In most cases the proxy playlist appears under **Music -> Custom** automatically on the next launch with **no manual import**: the launcher seeds the Custom import folder when it is empty, already points inside `SpiritSync\CustomAudio\Spotify`, is a leftover Spirit Sync folder, or points at a folder that no longer exists. If you already use the Custom tab for your own real folder, Spirit Sync leaves it alone, and you can import the Spotify folder above manually. Open **Music -> Custom**, pick the generated artist playlist, and press play; pausing it pauses Spotify.
 
 ## Uninstall
 

@@ -471,10 +471,10 @@ static void TryRetargetCustomMusicSaveToSpotifyProxy(string bridgeRoot, string s
     }
 
     var proxyRoot = Path.Combine(bridgeRoot, "CustomAudio", "Spotify");
-    if (!IsPathUnder(currentImportFolder, proxyRoot))
+    if (!ShouldSeedSpotifyProxy(currentImportFolder, proxyRoot))
     {
         Console.WriteLine(
-            "Spotify native custom audio folder is ready. Spirit City's Custom tab is currently pointed at another folder, so Spirit Sync left it alone."
+            "Spotify native custom audio folder is ready. Spirit City's Custom tab is currently pointed at your own folder, so Spirit Sync left it alone. Import the Spotify folder once to use the native bar."
         );
         return;
     }
@@ -597,6 +597,39 @@ static TaggedStringLocation? TryFindTaggedString(byte[] buffer, string propertyN
 static string ToSpiritCitySavePath(string path)
 {
     return Path.GetFullPath(path).Replace(Path.DirectorySeparatorChar, '/');
+}
+
+static bool ShouldSeedSpotifyProxy(string currentImportFolder, string proxyRoot)
+{
+    // Already pointing inside the Spirit Sync proxy area: retarget to the newest proxy folder.
+    if (IsPathUnder(currentImportFolder, proxyRoot))
+    {
+        return true;
+    }
+
+    // A Spirit Sync-owned path (an old proxy or probe folder) is ours to replace. Matches both
+    // "SpiritSync" and "Spirit Sync" by ignoring spaces.
+    if (currentImportFolder.Replace(" ", "").Contains("SpiritSync", StringComparison.OrdinalIgnoreCase))
+    {
+        return true;
+    }
+
+    // A recorded folder that no longer exists would only yield an empty/broken custom playlist,
+    // so it is safe to repoint at the working Spotify proxy. The previous value is preserved in
+    // the .spirit-sync.bak backup written before any change.
+    if (!DirectoryExistsSafe(currentImportFolder))
+    {
+        return true;
+    }
+
+    // A real, existing user folder: never clobber it.
+    return false;
+}
+
+static bool DirectoryExistsSafe(string path)
+{
+    var normalized = NormalizePath(path);
+    return normalized is not null && Directory.Exists(normalized);
 }
 
 static bool IsPathUnder(string path, string parent)

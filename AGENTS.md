@@ -59,6 +59,7 @@ POST /api/player/next
 POST /api/player/previous
 POST /api/player/shuffle
 POST /api/player/repeat
+POST /api/player/volume
 ```
 
 `/api/token` exists for the browser/Web Playback SDK pages. Do not expose the bridge outside the local machine.
@@ -274,7 +275,8 @@ These were verified in-game against the Steam build labeled **2.4.1** (June 2026
 - The in-game page defaults to Web API remote control of an existing Spotify device. Acting as its own Spotify Connect device is experimental and depends on Spotify's Web Playback SDK working inside Spirit City's embedded CEF browser.
 - The native bottom song bar is integrated through Spirit City's Custom audio system, not by replacing the game's internal Spotify-free music data. The Spotify title/artist shown on the bar is the track that was current **at launch**.
 - **Live native title is a hard limit, not a TODO.** The bottom bar caches its rendered text (FText/Slate) and only refreshes when the game itself pushes a track change. Patching the source FStrings in process memory updates the **Music list** view but NOT the persistent bottom bar (confirmed by experiment). Making the bar live would require input injection or deep Slate invalidation, which is too fragile/build-specific to ship. The live, always-current view stays in the in-game External -> Spirit Sync page.
-- **Native next/previous/shuffle/repeat are not mapped to Spotify, and cannot be via the save.** `SCLS_MusicPlayer.sav` stores only `currentPlaylistID`, `currentVolume`, and `IsPlaying` — no track index, shuffle, or repeat. For a single-track proxy the native next/previous are no-ops anyway. Use the External -> Spirit Sync page for transport.
+- **Native volume and shuffle on the bottom bar DO map to Spotify** (verified in 2.4.1). `SCLS_MusicPlayer.sav` persists `currentVolume` (DoubleProperty 0-1) and `isShuffle` (BoolProperty, present only while on), so the proxy controller forwards native volume-slider and shuffle changes to Spotify. Mapping is only-on-change with a per-session baseline, so entering the proxy never clobbers Spotify's existing volume/shuffle.
+- **Native next/previous/repeat are NOT mapped, and cannot be via the save.** The save records no track index and no repeat/loop state (a repeat toggle leaves the save byte-identical; a next/previous press too). They would need fragile process-memory hooks. For a single-track proxy the native next/previous are no-ops anyway. Use the External -> Spirit Sync page for skip/repeat.
 - Native built-in list playback pauses Spotify through the runtime patcher's save-file monitor (verified working). On a fresh launch the game may auto-start a built-in list, which keeps Spotify paused until you play the Spotify Custom proxy track instead.
 - Native Custom proxy playback maps play/pause to Spotify (verified working both directions).
 - Runtime menu patching depends on strings observed in the current Steam build. The External entry's YouTube URL and "Peaceful Piano" label were both still present and patchable in 2.4.1.
@@ -284,6 +286,7 @@ These were verified in-game against the Steam build labeled **2.4.1** (June 2026
 Confirmed by toggling native music in-game and diffing `%LOCALAPPDATA%\SpiritCity\Saved\SaveGames`:
 
 - `SCLS_MusicPlayer.sav` serializes the `IsPlaying` BoolProperty **only while playing** and omits the whole property when paused (playing save ~1903 bytes, paused ~1863 bytes). So the presence of the `IsPlaying` property name is itself the play signal; the patcher matches that name. The class name `SAVE_Sessions_MusicPlayer_C` does not contain "IsPlaying", so there is no false match.
+- The same save also carries `currentVolume` (DoubleProperty 0-1, updated when the native volume slider moves) and `isShuffle` (BoolProperty serialized **only while shuffle is on**, same presence pattern as `IsPlaying`). These are the only transport-ish fields that persist — repeat/loop and next/previous never touch the save. The proxy controller reads volume + shuffle and forwards them to Spotify (`/api/player/volume`, `/api/player/shuffle`).
 - Custom-imported playlists get `currentPlaylistID` in `[200, 300)` (e.g. "Liked songs" = 200, the first imported folder = 201). The Spotify-proxy detector keys on this range.
 - `SCLS_CustomMusic.sav` stores only `ImportFolderAddress`. The track list is NOT stored — the game **auto-scans that folder on launch** and builds the custom playlist (folder name = playlist/album, file name = track title). This is why seeding the import folder makes the proxy playlist appear without a manual import.
 - On a fresh launch the save's `currentPlaylistID` can briefly reflect the previous session until the game rewrites it, so the patcher's first reads after launch may lag the visible UI.

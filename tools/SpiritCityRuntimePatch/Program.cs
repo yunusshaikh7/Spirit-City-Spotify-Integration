@@ -640,6 +640,12 @@ static class NativeMusicSave
     // (the class name "SAVE_Sessions_MusicPlayer_C" does not contain "IsPlaying").
     private static readonly byte[] PlayingToken = Encoding.UTF8.GetBytes("IsPlaying");
 
+    // Shuffle uses the same conditional serialization as IsPlaying: the "isShuffle" BoolProperty is
+    // written only while shuffle is ON and omitted when off, so presence == shuffle on. (Verified
+    // in build 2.4.1. Repeat/loop and next/previous are NOT written to any save, so they cannot be
+    // mapped from the native bar.)
+    private static readonly byte[] ShuffleToken = Encoding.UTF8.GetBytes("isShuffle");
+
     public static SaveSnapshot Read(string musicSavePath)
     {
         try
@@ -667,7 +673,9 @@ static class NativeMusicSave
                 Contains(buffer, bytesRead, PlayingToken),
                 stream.Length,
                 file.LastWriteTimeUtc,
-                TryReadTaggedInt32(buffer, bytesRead, "currentPlaylistID")
+                TryReadTaggedInt32(buffer, bytesRead, "currentPlaylistID"),
+                TryReadTaggedDouble(buffer, bytesRead, "currentVolume"),
+                Contains(buffer, bytesRead, ShuffleToken)
             );
         }
         catch
@@ -721,6 +729,43 @@ static class NativeMusicSave
         }
 
         return BitConverter.ToInt32(buffer, valueOffset);
+    }
+
+    private static double? TryReadTaggedDouble(byte[] buffer, int length, string propertyName)
+    {
+        var nameBytes = Encoding.UTF8.GetBytes($"{propertyName}\0");
+        var nameIndex = buffer.AsSpan(0, length).IndexOf(nameBytes);
+        if (nameIndex < 0)
+        {
+            return null;
+        }
+
+        var typeLengthOffset = nameIndex + nameBytes.Length;
+        if (typeLengthOffset + 4 > length)
+        {
+            return null;
+        }
+
+        var typeLength = BitConverter.ToInt32(buffer, typeLengthOffset);
+        if (typeLength <= 0 || typeLength > 128)
+        {
+            return null;
+        }
+
+        var typeOffset = typeLengthOffset + 4;
+        var valueOffset = typeOffset + typeLength + 9;
+        if (valueOffset + 8 > length)
+        {
+            return null;
+        }
+
+        var typeName = Encoding.UTF8.GetString(buffer, typeOffset, typeLength).TrimEnd('\0');
+        if (!typeName.Equals("DoubleProperty", StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        return BitConverter.ToDouble(buffer, valueOffset);
     }
 }
 
@@ -884,6 +929,11 @@ sealed class SpotifyProxyController : IDisposable
     private volatile bool stopping;
     private bool? wasProxyPlaying;
     private DateTimeOffset nextSpotifyPlayEnforcement = DateTimeOffset.MinValue;
+    // Baselines for native -> Spotify mapping. Null means "not yet baselined for this proxy
+    // session"; the first observed value becomes the baseline and is NOT pushed, so entering the
+    // proxy never clobbers Spotify's existing volume/shuffle. Only later changes are forwarded.
+    private int? lastVolumePercent;
+    private bool? lastShuffle;
 
     public SpotifyProxyController(
         string musicSavePath,
@@ -934,8 +984,13 @@ sealed class SpotifyProxyController : IDisposable
         if (!spotifyProxyDetector.IsProxy(snapshot))
         {
             wasProxyPlaying = null;
+            lastVolumePercent = null;
+            lastShuffle = null;
             return;
         }
+
+        SyncVolume(snapshot);
+        SyncShuffle(snapshot);
 
         var changed = wasProxyPlaying != snapshot.IsPlaying;
         var enforcementDue = snapshot.IsPlaying
@@ -1021,6 +1076,81 @@ sealed class SpotifyProxyController : IDisposable
         }
     }
 
+    private void SyncVolume(SaveSnapshot snapshot)
+    {
+        if (snapshot.Volume is not double volume)
+        {
+            return;
+        }
+
+        var percent = Math.Clamp((int)Math.Round(volume * 100), 0, 100);
+        if (lastVolumePercent is null)
+        {
+            lastVolumePercent = percent; // baseline; do not push on first sight
+            return;
+        }
+
+        if (percent == lastVolumePercent)
+        {
+            return;
+        }
+
+        lastVolumePercent = percent;
+        PostPlayerCommand(
+            "/api/player/volume",
+            $"{{\"volume\":{percent}}}",
+            $"spotifyProxyVolume={percent}"
+        );
+    }
+
+    private void SyncShuffle(SaveSnapshot snapshot)
+    {
+        if (lastShuffle is null)
+        {
+            lastShuffle = snapshot.IsShuffle; // baseline; do not push on first sight
+            return;
+        }
+
+        if (snapshot.IsShuffle == lastShuffle)
+        {
+            return;
+        }
+
+        lastShuffle = snapshot.IsShuffle;
+        PostPlayerCommand(
+            "/api/player/shuffle",
+            $"{{\"state\":{(snapshot.IsShuffle ? "true" : "false")}}}",
+            $"spotifyProxyShuffle={snapshot.IsShuffle}"
+        );
+    }
+
+    private void PostPlayerCommand(string path, string jsonBody, string label)
+    {
+        try
+        {
+            using var content = new StringContent(jsonBody, Encoding.UTF8, "application/json");
+            using var response = http.PostAsync($"{bridgeBaseUrl}{path}", content)
+                .GetAwaiter()
+                .GetResult();
+
+            if (!quiet)
+            {
+                Console.WriteLine(
+                    response.IsSuccessStatusCode
+                        ? $"{label} ok=true"
+                        : $"{label} ok=false status={(int)response.StatusCode}"
+                );
+            }
+        }
+        catch (Exception error)
+        {
+            if (!quiet)
+            {
+                Console.WriteLine($"{label} ok=false error={error.Message}");
+            }
+        }
+    }
+
     private bool IsSpotifyPlaying()
     {
         using var response = http.GetAsync($"{bridgeBaseUrl}/api/status")
@@ -1044,10 +1174,12 @@ sealed record SaveSnapshot(
     bool IsPlaying,
     long Length,
     DateTime LastWriteTimeUtc,
-    int? CurrentPlaylistId
+    int? CurrentPlaylistId,
+    double? Volume,
+    bool IsShuffle
 )
 {
-    public static readonly SaveSnapshot NotPlaying = new(false, 0, DateTime.MinValue, null);
+    public static readonly SaveSnapshot NotPlaying = new(false, 0, DateTime.MinValue, null, null, false);
 }
 
 [Flags]

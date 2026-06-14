@@ -633,7 +633,12 @@ sealed class NativeMusicMonitor
 
 static class NativeMusicSave
 {
-    private static readonly byte[] PlayingToken = Encoding.UTF8.GetBytes("Playing");
+    // Spirit City (build 2.4.1) serializes the SCLS_MusicPlayer save's "IsPlaying" BoolProperty
+    // ONLY while playing and omits the whole property when paused. So the presence of the
+    // "IsPlaying" property name is itself the play signal. We match the full property name rather
+    // than a bare "Playing" substring so an unrelated string in a future build cannot false-match
+    // (the class name "SAVE_Sessions_MusicPlayer_C" does not contain "IsPlaying").
+    private static readonly byte[] PlayingToken = Encoding.UTF8.GetBytes("IsPlaying");
 
     public static SaveSnapshot Read(string musicSavePath)
     {

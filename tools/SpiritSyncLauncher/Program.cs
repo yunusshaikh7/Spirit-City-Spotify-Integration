@@ -295,6 +295,30 @@ static Process StartGame(string gameRoot, IReadOnlyList<string> gameArgs, int ce
     ) ?? throw new InvalidOperationException("Could not start Spirit City.");
 }
 
+static void StopOrphanedRuntimePatchers()
+{
+    // A patcher from a previous session can outlive its game if this launcher was force-killed
+    // (e.g. Steam's Stop button) before it could clean up on game exit. A leftover patcher keeps
+    // reading the last-written save and commanding the user's Spotify, which looks like Spotify
+    // starting and pausing on its own. Clear any such process before starting a fresh one.
+    foreach (var stale in Process.GetProcessesByName("SpiritCityRuntimePatch"))
+    {
+        try
+        {
+            stale.Kill(entireProcessTree: true);
+            stale.WaitForExit(2000);
+        }
+        catch
+        {
+            // Best-effort cleanup; never block game launch on it.
+        }
+        finally
+        {
+            stale.Dispose();
+        }
+    }
+}
+
 static Process? StartRuntimePatcher(
     string bridgeRoot,
     string inGameUrl,
@@ -316,6 +340,8 @@ static Process? StartRuntimePatcher(
 
     try
     {
+        StopOrphanedRuntimePatchers();
+
         var startInfo = new ProcessStartInfo
         {
             FileName = patcherPath,
@@ -530,11 +556,15 @@ static void TryRetargetCustomMusicSaveToSpotifyProxy(string bridgeRoot, string s
 static string? TryReadTaggedString(byte[] buffer, string propertyName)
 {
     var location = TryFindTaggedString(buffer, propertyName);
-    return location is null
-        ? null
-        : Encoding.UTF8.GetString(buffer, location.ValueOffset, location.ValueLength)
-            .TrimEnd('\0')
-            .Trim();
+    if (location is null)
+    {
+        return null;
+    }
+
+    return (location.IsUtf16 ? Encoding.Unicode : Encoding.UTF8)
+        .GetString(buffer, location.ValueOffset, location.ValueLength)
+        .TrimEnd('\0')
+        .Trim();
 }
 
 static byte[]? TryReplaceTaggedString(byte[] buffer, string propertyName, string value)
@@ -545,9 +575,29 @@ static byte[]? TryReplaceTaggedString(byte[] buffer, string propertyName, string
         return null;
     }
 
-    var newValue = Encoding.UTF8.GetBytes(value.TrimEnd('/', '\\') + "/\0");
+    // UE FString encoding: an ASCII-only path serializes as UTF-8 with a positive length, but any
+    // non-ASCII character (e.g. a Japanese artist folder) MUST serialize as UTF-16LE with a
+    // NEGATIVE length (magnitude = code units including the null terminator). Writing non-ASCII as
+    // positive-length UTF-8 makes Spirit City read the bytes as Latin-1 and look for a folder that
+    // does not exist on disk, so the Spotify proxy playlist silently fails to appear.
+    var text = value.TrimEnd('/', '\\') + "/";
+    byte[] newValue;
+    int signedLength;
+    if (text.All(character => character <= '\x7F'))
+    {
+        newValue = Encoding.UTF8.GetBytes(text + "\0");
+        signedLength = newValue.Length;
+    }
+    else
+    {
+        var utf16 = Encoding.Unicode.GetBytes(text);
+        newValue = new byte[utf16.Length + 2]; // trailing two zero bytes = UTF-16 null terminator
+        Array.Copy(utf16, newValue, utf16.Length);
+        signedLength = -(text.Length + 1);
+    }
+
     var newPropertySize = BitConverter.GetBytes(newValue.Length + 4);
-    var newValueLength = BitConverter.GetBytes(newValue.Length);
+    var newValueLength = BitConverter.GetBytes(signedLength);
     var oldEnd = location.ValueOffset + location.ValueLength;
 
     using var stream = new MemoryStream(buffer.Length - location.ValueLength + newValue.Length);
@@ -599,14 +649,19 @@ static TaggedStringLocation? TryFindTaggedString(byte[] buffer, string propertyN
         return null;
     }
 
-    var valueLength = BitConverter.ToInt32(buffer, valueLengthOffset);
-    if (valueLength <= 0 || valueLength > 4096)
+    // UE FString: positive length => UTF-8/ANSI (1 byte/unit); negative length => UTF-16LE
+    // (2 bytes/unit). The magnitude counts code units including the null terminator. ValueLength
+    // below is normalized to a BYTE count so the splice in TryReplaceTaggedString stays correct.
+    var rawLength = BitConverter.ToInt32(buffer, valueLengthOffset);
+    if (rawLength == 0 || Math.Abs((long)rawLength) > 8192)
     {
         return null;
     }
 
+    var isUtf16 = rawLength < 0;
+    var byteLength = isUtf16 ? -rawLength * 2 : rawLength;
     var valueOffset = valueLengthOffset + sizeof(int);
-    if (valueOffset + valueLength > buffer.Length)
+    if (valueOffset + byteLength > buffer.Length)
     {
         return null;
     }
@@ -615,7 +670,8 @@ static TaggedStringLocation? TryFindTaggedString(byte[] buffer, string propertyN
         propertySizeOffset,
         valueLengthOffset,
         valueOffset,
-        valueLength
+        byteLength,
+        isUtf16
     );
 }
 
@@ -1010,7 +1066,8 @@ sealed record TaggedStringLocation(
     int PropertySizeOffset,
     int ValueLengthOffset,
     int ValueOffset,
-    int ValueLength
+    int ValueLength,
+    bool IsUtf16
 );
 
 sealed record CefTarget(

@@ -69,9 +69,25 @@ else if (mode.Equals("watch", StringComparison.OrdinalIgnoreCase))
     var duration = int.TryParse(GetArg(args, "--duration-sec") ?? "", out var parsedDuration)
         ? parsedDuration
         : 120;
+    // All save-driven Spotify control must stop the moment the game is gone. The launcher kills
+    // this patcher on a clean game exit, but if the launcher itself is force-killed (e.g. Steam's
+    // Stop button) the patcher would otherwise keep reading the last-written save and command the
+    // user's Spotify for the full duration. Each controller checks this and self-stops.
+    Func<bool> isGameAlive = () =>
+    {
+        try
+        {
+            return !process.HasExited;
+        }
+        catch
+        {
+            return false;
+        }
+    };
+
     var spotifyProxyDetector = new SpotifyProxyDetector(customMusicSavePath, spotifyProxyFolder);
     using var spotifyProxyController = spotifyProxyDetector.IsEnabled
-        ? new SpotifyProxyController(musicSavePath, bridgeBaseUrl, spotifyProxyDetector, quiet)
+        ? new SpotifyProxyController(musicSavePath, bridgeBaseUrl, spotifyProxyDetector, isGameAlive, quiet)
         : null;
     spotifyProxyController?.Start(TimeSpan.FromMilliseconds(500));
 
@@ -83,12 +99,13 @@ else if (mode.Equals("watch", StringComparison.OrdinalIgnoreCase))
                 bridgeBaseUrl,
                 spotifyProxyDetector,
                 spotifyProxyFolder,
+                isGameAlive,
                 quiet
             )
             : null;
     if (nativeTrackController?.IsUsable == true)
     {
-        nativeTrackController.Start(TimeSpan.FromMilliseconds(1500));
+        nativeTrackController.Start(TimeSpan.FromMilliseconds(600));
     }
 
     var total = WatchSpiritSync(
@@ -97,8 +114,9 @@ else if (mode.Equals("watch", StringComparison.OrdinalIgnoreCase))
         TimeSpan.FromSeconds(duration),
         quiet,
         replacementUrl,
+        isGameAlive,
         nativeSpotifyPauseEnabled
-            ? new NativeMusicMonitor(musicSavePath, bridgeBaseUrl, spotifyProxyDetector, quiet)
+            ? new NativeMusicMonitor(musicSavePath, bridgeBaseUrl, spotifyProxyDetector, isGameAlive, quiet)
             : null
     );
     Console.WriteLine($"totalApplied={total}");
@@ -123,9 +141,15 @@ else if (mode.Equals("refs", StringComparison.OrdinalIgnoreCase))
         .ToArray();
     FindReferences(handle, terms);
 }
+else if (mode.Equals("trackscan", StringComparison.OrdinalIgnoreCase))
+{
+    var proxy = GetArg(args, "--spotify-proxy-folder")
+        ?? throw new ArgumentException("trackscan requires --spotify-proxy-folder=<path>");
+    TrackScan(handle, proxy);
+}
 else
 {
-    throw new ArgumentException("Usage: SpiritCityRuntimePatch scan [terms...] | dump <hex-address> [length] | refs [terms...] | patch | watch [--interval-ms=1500] [--duration-sec=120] [--quiet] [--bridge-url=http://127.0.0.1:8012] [--music-save=<path>] [--custom-music-save=<path>] [--spotify-proxy-folder=<path>] [--no-native-spotify-pause]");
+    throw new ArgumentException("Usage: SpiritCityRuntimePatch scan [terms...] | dump <hex-address> [length] | refs [terms...] | trackscan --spotify-proxy-folder=<path> | patch | watch [--interval-ms=1500] [--duration-sec=120] [--quiet] [--bridge-url=http://127.0.0.1:8012] [--music-save=<path>] [--custom-music-save=<path>] [--spotify-proxy-folder=<path>] [--no-native-spotify-pause]");
 }
 
 static void Scan(SafeProcessHandle handle, string[] terms)
@@ -169,6 +193,7 @@ static int WatchSpiritSync(
     TimeSpan duration,
     bool quiet,
     string replacementUrl,
+    Func<bool> isGameAlive,
     NativeMusicMonitor? nativeMusicMonitor
 )
 {
@@ -178,7 +203,7 @@ static int WatchSpiritSync(
     nativeMusicMonitor?.Start(TimeSpan.FromMilliseconds(500));
     try
     {
-        while (DateTimeOffset.UtcNow < deadline)
+        while (DateTimeOffset.UtcNow < deadline && isGameAlive())
         {
             var applied = PatchSpiritSync(handle, quiet, replacementUrl);
             total += applied;
@@ -189,6 +214,11 @@ static int WatchSpiritSync(
             }
 
             Thread.Sleep(interval);
+        }
+
+        if (!quiet && !isGameAlive())
+        {
+            Console.WriteLine("Spirit City exited; stopping Spirit Sync runtime patcher.");
         }
     }
     finally
@@ -510,6 +540,111 @@ static SafeProcessHandle OpenProcess(ProcessAccess access, bool inheritHandle, i
     return Native.OpenProcess(access, inheritHandle, processId);
 }
 
+// Diagnostic: print how often each proxy slot's name/file/path appears in game memory, so the
+// current-track signal can be chosen from real data instead of guessed. Run while the proxy is the
+// active playlist (try it with the track list open AND closed to see which signal stays clean).
+static void TrackScan(SafeProcessHandle handle, string proxyFolder)
+{
+    var fileNames = new DirectoryInfo(proxyFolder)
+        .GetFiles("*.wav")
+        .OrderBy(f => f.CreationTimeUtc)
+        .ThenBy(f => f.Name, StringComparer.Ordinal)
+        .Select(f => f.Name)
+        .ToArray();
+    if (fileNames.Length == 0)
+    {
+        Console.WriteLine($"trackscan: no .wav files in {proxyFolder}");
+        return;
+    }
+
+    var displayNeedles = fileNames.Select(n => Encoding.Unicode.GetBytes(Path.GetFileNameWithoutExtension(n) + "\0")).ToArray();
+    var fileNeedles = fileNames.Select(n => Encoding.Unicode.GetBytes(n + "\0")).ToArray();
+    var pathNeedles = fileNames.Select(n => Encoding.Unicode.GetBytes(Path.Combine(proxyFolder, n))).ToArray();
+    var names = fileNames.Select(n => Path.GetFileNameWithoutExtension(n)).ToArray();
+    var lcp = names.Aggregate((a, b) => { var k = 0; var lim = Math.Min(a.Length, b.Length); while (k < lim && a[k] == b[k]) { k++; } return a[..k]; });
+    var prefixNeedle = lcp.Length >= 3 ? Encoding.Unicode.GetBytes(lcp) : null;
+
+    var n = fileNames.Length;
+    var display = new long[n];
+    var file = new long[n];
+    var path = new long[n];
+
+    const int cap = 16 * 1024 * 1024; // mirror NativeTrackController.ScanRegionCapBytes
+    var buffer = new byte[cap];
+    var address = IntPtr.Zero;
+    var infoSize = (nuint)Marshal.SizeOf<MEMORY_BASIC_INFORMATION>();
+    long regions = 0;
+    long readableRegions = 0;
+    long totalRead = 0;
+    long maxMatched = 0;
+    while (Native.VirtualQueryEx(handle, address, out var info, infoSize) != 0)
+    {
+        var regionSize = checked((long)info.RegionSize);
+        var nextAddress = info.BaseAddress.ToInt64() + regionSize;
+        if (nextAddress <= address.ToInt64()) break;
+        address = new IntPtr(nextAddress);
+
+        if (info.State != MemoryState.Commit || info.Type != MemoryType.Private) continue;
+        var protect = info.Protect & ~MemoryProtect.Guard;
+        var readable = protect is MemoryProtect.ReadWrite or MemoryProtect.ReadOnly or MemoryProtect.WriteCopy
+            or MemoryProtect.ExecuteRead or MemoryProtect.ExecuteReadWrite or MemoryProtect.ExecuteWriteCopy;
+        if (!readable || regionSize <= 0 || regionSize > cap) continue;
+        readableRegions += 1;
+
+        if (!Native.ReadProcessMemory(handle, info.BaseAddress, buffer, (int)regionSize, out var read) || read == 0) continue;
+        totalRead += read;
+        if (prefixNeedle is not null && buffer.AsSpan(0, read).IndexOf(prefixNeedle) < 0) continue;
+        regions += 1;
+        if (read > maxMatched) maxMatched = read;
+
+        for (var i = 0; i < n; i += 1)
+        {
+            display[i] += CountNeedle(buffer, read, displayNeedles[i]);
+            file[i] += CountNeedle(buffer, read, fileNeedles[i]);
+            path[i] += CountNeedle(buffer, read, pathNeedles[i]);
+        }
+    }
+
+    Console.WriteLine($"trackscan: {n} slots, {regions} matched of {readableRegions} readable regions; read {totalRead / 1024 / 1024}MB; largest matched region {maxMatched / 1024.0 / 1024:F2}MB");
+    Console.WriteLine("slot            display  file   path");
+    for (var i = 0; i < n; i += 1)
+    {
+        Console.WriteLine("{0,-14} {1,7} {2,5} {3,6}", Path.GetFileNameWithoutExtension(fileNames[i]), display[i], file[i], path[i]);
+    }
+    PrintArgmax("display", display);
+    PrintArgmax("file", file);
+    PrintArgmax("path", path);
+}
+
+static void PrintArgmax(string label, long[] counts)
+{
+    var best = -1;
+    long b = 0;
+    long s = 0;
+    for (var i = 0; i < counts.Length; i += 1)
+    {
+        if (counts[i] > b) { s = b; b = counts[i]; best = i; }
+        else if (counts[i] > s) { s = counts[i]; }
+    }
+    Console.WriteLine($"  {label}: best=slot#{best} count={b} runnerUp={s} margin={b - s}");
+}
+
+static long CountNeedle(byte[] buffer, int length, byte[] needle)
+{
+    if (needle.Length == 0) return 0;
+    long count = 0;
+    var offset = 0;
+    var span = buffer.AsSpan(0, length);
+    while (offset <= span.Length - needle.Length)
+    {
+        var index = span[offset..].IndexOf(needle);
+        if (index < 0) break;
+        count += 1;
+        offset += index + needle.Length;
+    }
+    return count;
+}
+
 sealed class NativeMusicMonitor
 {
     private static readonly TimeSpan SpotifyPauseEnforcementInterval = TimeSpan.FromSeconds(4);
@@ -523,17 +658,20 @@ sealed class NativeMusicMonitor
     private bool wasPlaying;
     private DateTimeOffset nextSpotifyPauseEnforcement = DateTimeOffset.MinValue;
     private SaveSnapshot? lastSaveSnapshot;
+    private readonly Func<bool> isGameAlive;
 
     public NativeMusicMonitor(
         string musicSavePath,
         string bridgeBaseUrl,
         SpotifyProxyDetector spotifyProxyDetector,
+        Func<bool> isGameAlive,
         bool quiet
     )
     {
         this.musicSavePath = musicSavePath;
         this.bridgeBaseUrl = bridgeBaseUrl;
         this.spotifyProxyDetector = spotifyProxyDetector;
+        this.isGameAlive = isGameAlive;
         this.quiet = quiet;
         http.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
     }
@@ -563,6 +701,12 @@ sealed class NativeMusicMonitor
 
     public void Poll()
     {
+        if (!isGameAlive())
+        {
+            stopping = true;
+            return;
+        }
+
         var snapshot = NativeMusicSave.Read(musicSavePath);
         var isPlaying = snapshot.IsPlaying;
         if (isPlaying && spotifyProxyDetector.IsProxy(snapshot))
@@ -846,19 +990,26 @@ static class CustomMusicSave
             return null;
         }
 
-        var valueLength = BitConverter.ToInt32(buffer, valueLengthOffset);
-        if (valueLength <= 0 || valueLength > 4096)
+        // UE FString: a positive length means UTF-8/ANSI (1 byte per unit); a negative length means
+        // UTF-16LE (2 bytes per unit). The magnitude counts code units including the null
+        // terminator. Non-ASCII import folders (e.g. a Japanese artist name) are stored UTF-16, so
+        // both encodings must be decoded or the proxy would look "not selected" to the patcher.
+        var rawLength = BitConverter.ToInt32(buffer, valueLengthOffset);
+        if (rawLength == 0 || Math.Abs((long)rawLength) > 8192)
         {
             return null;
         }
 
+        var isUtf16 = rawLength < 0;
+        var byteLength = isUtf16 ? -rawLength * 2 : rawLength;
         var valueOffset = valueLengthOffset + 4;
-        if (valueOffset + valueLength > length)
+        if (valueOffset + byteLength > length)
         {
             return null;
         }
 
-        return Encoding.UTF8.GetString(buffer, valueOffset, valueLength)
+        return (isUtf16 ? Encoding.Unicode : Encoding.UTF8)
+            .GetString(buffer, valueOffset, byteLength)
             .TrimEnd('\0')
             .Trim();
     }
@@ -951,6 +1102,7 @@ sealed class SpotifyProxyController : IDisposable
     private Thread? thread;
     private volatile bool stopping;
     private bool? wasProxyPlaying;
+    private readonly Func<bool> isGameAlive;
     private DateTimeOffset nextSpotifyPlayEnforcement = DateTimeOffset.MinValue;
     // Baselines for native -> Spotify mapping. Null means "not yet baselined for this proxy
     // session"; the first observed value becomes the baseline and is NOT pushed, so entering the
@@ -963,12 +1115,14 @@ sealed class SpotifyProxyController : IDisposable
         string musicSavePath,
         string bridgeBaseUrl,
         SpotifyProxyDetector spotifyProxyDetector,
+        Func<bool> isGameAlive,
         bool quiet
     )
     {
         this.musicSavePath = musicSavePath;
         this.bridgeBaseUrl = bridgeBaseUrl;
         this.spotifyProxyDetector = spotifyProxyDetector;
+        this.isGameAlive = isGameAlive;
         this.quiet = quiet;
         http.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
     }
@@ -1004,6 +1158,12 @@ sealed class SpotifyProxyController : IDisposable
 
     private void Poll()
     {
+        if (!isGameAlive())
+        {
+            stopping = true;
+            return;
+        }
+
         var snapshot = NativeMusicSave.Read(musicSavePath);
         if (!spotifyProxyDetector.IsProxy(snapshot))
         {
@@ -1236,9 +1396,17 @@ sealed class NativeTrackController : IDisposable
     private readonly int trackCount; // tracks in game order (= file creation order)
     private readonly byte[][] displayNeedles; // UTF-16 file name without extension + null
     private readonly byte[][] fileNeedles; // UTF-16 full file name (with .wav) + null
+    private readonly byte[]? prefixNeedle; // UTF-16 shared name prefix (e.g. "Spotify "); regions without it hold no slot name and are skipped to keep the scan fast
+    // The slot-name strings live in small heap pools (measured <=3MB). The game also commits
+    // multi-GB asset/render buffers that never hold them, so skipping any region larger than this
+    // cuts the per-scan read from ~5GB to a few MB (a ~20s scan becomes well under a second). One
+    // reused buffer avoids allocating tens of thousands of arrays per scan.
+    private const int ScanRegionCapBytes = 16 * 1024 * 1024;
+    private readonly byte[] scanBuffer = new byte[ScanRegionCapBytes];
     private Thread? thread;
     private volatile bool stopping;
     private int? lastIndex;
+    private readonly Func<bool> isGameAlive;
 
     public NativeTrackController(
         int processId,
@@ -1246,6 +1414,7 @@ sealed class NativeTrackController : IDisposable
         string bridgeBaseUrl,
         SpotifyProxyDetector detector,
         string proxyFolder,
+        Func<bool> isGameAlive,
         bool quiet
     )
     {
@@ -1253,6 +1422,7 @@ sealed class NativeTrackController : IDisposable
         this.musicSavePath = musicSavePath;
         this.bridgeBaseUrl = bridgeBaseUrl;
         this.detector = detector;
+        this.isGameAlive = isGameAlive;
         this.quiet = quiet;
         http.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
 
@@ -1267,6 +1437,40 @@ sealed class NativeTrackController : IDisposable
         fileNeedles = fileNames
             .Select(name => Encoding.Unicode.GetBytes(name + "\0"))
             .ToArray();
+
+        // Every slot name shares a prefix (the launcher names them "Spotify 01".."Spotify NN", so the
+        // prefix is "Spotify "). A region that does not contain the prefix cannot contain any slot
+        // name, so one cheap prefix check lets the scan skip the per-slot counting on the vast
+        // majority of regions — turning a ~20s full scan into a sub-second one.
+        var prefix = LongestCommonPrefix(fileNames.Select(name => Path.GetFileNameWithoutExtension(name)).ToArray());
+        prefixNeedle = prefix.Length >= 3 ? Encoding.Unicode.GetBytes(prefix) : null;
+    }
+
+    private static string LongestCommonPrefix(string[] values)
+    {
+        if (values.Length == 0)
+        {
+            return string.Empty;
+        }
+
+        var prefix = values[0];
+        foreach (var value in values)
+        {
+            var limit = Math.Min(prefix.Length, value.Length);
+            var k = 0;
+            while (k < limit && prefix[k] == value[k])
+            {
+                k += 1;
+            }
+
+            prefix = prefix[..k];
+            if (prefix.Length == 0)
+            {
+                break;
+            }
+        }
+
+        return prefix;
     }
 
     // Needs at least two tracks for next/previous to move an index.
@@ -1335,6 +1539,12 @@ sealed class NativeTrackController : IDisposable
 
     private void Poll()
     {
+        if (!isGameAlive())
+        {
+            stopping = true;
+            return;
+        }
+
         var snapshot = NativeMusicSave.Read(musicSavePath);
         if (!detector.IsProxy(snapshot))
         {
@@ -1364,25 +1574,26 @@ sealed class NativeTrackController : IDisposable
 
         var count = trackCount;
         var forward = ((index - previous) % count + count) % count; // steps moving forward on the ring
-        bool next;
-        if (snapshot.IsShuffle)
+        if (forward == 0)
         {
-            next = true; // shuffle picks a random track; map any change to a single Spotify next
-        }
-        else if (forward == 1)
-        {
-            next = true;
-        }
-        else if (forward == count - 1)
-        {
-            next = false; // moved back one (wrapped around the ring)
-        }
-        else
-        {
-            next = forward <= count / 2; // unusual multi-step jump: take the nearest direction
+            return;
         }
 
-        PostSkip(next, $"nativeIndex {previous}->{index}");
+        if (snapshot.IsShuffle)
+        {
+            PostSkip(true, $"nativeIndex {previous}->{index} (shuffle)"); // random slot; one Spotify next
+            return;
+        }
+
+        // Move the shorter way around the ring and forward exactly that many Spotify skips. Several
+        // quick native presses land between scans, so the index can jump multiple slots at once; if
+        // we only ever sent one skip, those extra presses would be silently dropped.
+        var next = forward <= count - forward;
+        var steps = next ? forward : count - forward;
+        for (var step = 0; step < steps; step += 1)
+        {
+            PostSkip(next, $"nativeIndex {previous}->{index} step {step + 1}/{steps}");
+        }
     }
 
     private int DetectCurrentIndex()
@@ -1397,7 +1608,8 @@ sealed class NativeTrackController : IDisposable
             return -1;
         }
 
-        var counts = new long[trackCount];
+        var displayCounts = new long[trackCount];
+        var fileCounts = new long[trackCount];
         var address = IntPtr.Zero;
         var infoSize = (nuint)Marshal.SizeOf<MEMORY_BASIC_INFORMATION>();
         while (Native.VirtualQueryEx(handle, address, out var info, infoSize) != 0)
@@ -1425,26 +1637,56 @@ sealed class NativeTrackController : IDisposable
                 or MemoryProtect.ExecuteRead
                 or MemoryProtect.ExecuteReadWrite
                 or MemoryProtect.ExecuteWriteCopy;
-            if (!readable || regionSize <= 0 || regionSize > 128 * 1024 * 1024)
+            if (!readable || regionSize <= 0 || regionSize > ScanRegionCapBytes)
             {
                 continue;
             }
 
-            var buffer = new byte[(int)regionSize];
-            if (!Native.ReadProcessMemory(handle, info.BaseAddress, buffer, buffer.Length, out var read) || read == 0)
+            if (!Native.ReadProcessMemory(handle, info.BaseAddress, scanBuffer, (int)regionSize, out var read) || read == 0)
+            {
+                continue;
+            }
+
+            // Cheap reject: skip the 24 per-slot scans on any region that lacks the shared name
+            // prefix entirely (almost all of them).
+            if (prefixNeedle is not null && scanBuffer.AsSpan(0, read).IndexOf(prefixNeedle) < 0)
             {
                 continue;
             }
 
             for (var i = 0; i < trackCount; i += 1)
             {
-                counts[i] += CountOccurrences(buffer, read, displayNeedles[i])
-                    + CountOccurrences(buffer, read, fileNeedles[i]);
+                displayCounts[i] += CountOccurrences(scanBuffer, read, displayNeedles[i]);
+                fileCounts[i] += CountOccurrences(scanBuffer, read, fileNeedles[i]);
             }
         }
 
-        // The current track's title appears the most; require a clear margin over the runner-up so
-        // a transient or tied scan does not produce a phantom skip.
+        // The current track is referenced more than any other slot. Prefer the DISPLAY-name signal:
+        // measured live in 2.4.1, the playing slot's title out-counts every other slot by a clean,
+        // stable margin (e.g. 7 vs 4 with the panel open) and the previously-played slot drops
+        // straight back to the baseline. The file-name and full-path signals linger for the
+        // previous track after a skip (the audio subsystem keeps them resident), so summing them in
+        // can erode or tie the margin. Use display alone when it is decisive; fall back to
+        // display+file only if it is not (e.g. the music panel is closed, where display references
+        // are sparse). Require a clear margin so a transient or tied scan never causes a phantom skip.
+        var combined = new long[trackCount];
+        for (var i = 0; i < trackCount; i += 1)
+        {
+            combined[i] = displayCounts[i] + fileCounts[i];
+        }
+
+        var byDisplay = Argmax(displayCounts);
+        if (byDisplay.best >= 0 && byDisplay.bestCount >= byDisplay.secondCount + 2)
+        {
+            return byDisplay.best;
+        }
+
+        var bySum = Argmax(combined);
+        return bySum.best >= 0 && bySum.bestCount >= bySum.secondCount + 2 ? bySum.best : -1;
+    }
+
+    private static (int best, long bestCount, long secondCount) Argmax(long[] counts)
+    {
         var best = -1;
         long bestCount = 0;
         long secondCount = 0;
@@ -1462,7 +1704,7 @@ sealed class NativeTrackController : IDisposable
             }
         }
 
-        return best >= 0 && bestCount >= secondCount + 2 ? best : -1;
+        return (best, bestCount, secondCount);
     }
 
     private static long CountOccurrences(byte[] buffer, int length, byte[] needle)

@@ -143,7 +143,7 @@ Implementation notes for automated contributors live in [AGENTS.md](AGENTS.md).
 - Replacement launcher project that can mirror the old mod's `SpiritCity.exe` / `SpiritCityBackup.exe` install layout.
 - Runtime patcher that renames the first Web Music Player entry to `Spirit Sync` and points it at the local in-game Spotify page.
 - Runtime monitor that pauses Spotify when a normal Spirit City native music-list track is playing.
-- Native Custom-audio proxy support: Spirit Sync generates a multi-track silent proxy playlist (hard-linked, so ~1x one WAV on disk) and maps the native bar's play/pause, next, previous, shuffle, repeat/loop, and volume to Spotify. Next/previous are detected from process memory by which proxy track the game is playing.
+- Native Custom-audio proxy support: Spirit Sync generates a multi-track silent proxy playlist (hard-linked, so ~1x one WAV on disk) and maps the native bar's play/pause, next, previous, shuffle, repeat/loop, and volume to Spotify. Next/previous are detected from process memory by which proxy track the game is playing. The proxy playlist appears under **Music -> Custom** for any artist name, including non-Latin scripts (e.g. Japanese or accented names), and all Spotify control stops automatically when Spirit City closes.
 - Legacy `spirit-sync.env` compatibility for the old README's `ClientID`, `ClientSecret`, and `SpotifyUser` names.
 
 ## Spotify App Setup

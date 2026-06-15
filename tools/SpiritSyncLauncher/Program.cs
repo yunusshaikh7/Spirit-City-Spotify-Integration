@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Net.Http.Json;
 using System.Net.WebSockets;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -369,6 +370,12 @@ static string? TryPrepareSpotifyProxyAudio(string bridgeRoot, string bridgeBaseU
 
 static string EnsureSpotifyProxyAudio(string bridgeRoot, string bridgeBaseUrl)
 {
+    // Number of silent tracks in the proxy playlist. Multiple identically-silent tracks let
+    // the native next/previous buttons move a track index that the runtime patcher detects (by
+    // counting which track title appears most in the game's memory) and maps to Spotify skip.
+    // Track 00 is a real WAV; the rest are hard links so disk cost stays ~1x one WAV.
+    const int trackCount = 12;
+
     var labels = ReadSpotifyProxyLabels(bridgeBaseUrl);
     var proxyRoot = Path.Combine(bridgeRoot, "CustomAudio", "Spotify");
     ResetSpotifyProxyRoot(bridgeRoot, proxyRoot);
@@ -376,15 +383,35 @@ static string EnsureSpotifyProxyAudio(string bridgeRoot, string bridgeBaseUrl)
     var proxyFolder = Path.Combine(proxyRoot, SanitizeFileName(labels.Artist, "Spotify"));
     Directory.CreateDirectory(proxyFolder);
 
-    var proxyAudioPath = Path.Combine(
-        proxyFolder,
-        $"{SanitizeFileName(labels.Title, "Spotify")}.wav"
-    );
-    if (File.Exists(proxyAudioPath) && new FileInfo(proxyAudioPath).Length > 1024 * 1024)
+    // Names are uniform, SHORT, and zero-padded. Short matters: the game truncates long track
+    // titles in its now-playing bar, and the patcher detects the current track by how often its
+    // title appears in memory, so a truncated title would be undetectable. They are created in
+    // index order because the game lists custom tracks by creation order. The folder name carries
+    // the artist for the bar's second line; the live song title shows on the External page.
+    var basePath = Path.Combine(proxyFolder, "Spotify 01.wav");
+    WriteSilentWav(basePath);
+
+    for (var i = 1; i < trackCount; i += 1)
     {
-        return proxyFolder;
+        var linkPath = Path.Combine(proxyFolder, $"Spotify {i + 1:D2}.wav");
+        if (File.Exists(linkPath))
+        {
+            continue;
+        }
+
+        // Hard link shares the single WAV's data. Fall back to a copy if links are unavailable
+        // (e.g. a different volume), accepting the extra disk in that rare case.
+        if (!NativeFs.CreateHardLinkW(linkPath, basePath, IntPtr.Zero))
+        {
+            File.Copy(basePath, linkPath);
+        }
     }
 
+    return proxyFolder;
+}
+
+static void WriteSilentWav(string path)
+{
     const int sampleRate = 8000;
     const short channels = 1;
     const short bitsPerSample = 16;
@@ -394,7 +421,7 @@ static string EnsureSpotifyProxyAudio(string bridgeRoot, string bridgeBaseUrl)
     var byteRate = sampleRate * blockAlign;
     var dataBytes = sampleRate * durationSeconds * blockAlign;
 
-    using var stream = File.Create(proxyAudioPath);
+    using var stream = File.Create(path);
     using var writer = new BinaryWriter(stream, Encoding.ASCII);
     writer.Write(Encoding.ASCII.GetBytes("RIFF"));
     writer.Write(36 + dataBytes);
@@ -418,8 +445,6 @@ static string EnsureSpotifyProxyAudio(string bridgeRoot, string bridgeBaseUrl)
         writer.Write(buffer, 0, count);
         remaining -= count;
     }
-
-    return proxyFolder;
 }
 
 static void ResetSpotifyProxyRoot(string bridgeRoot, string proxyRoot)
@@ -952,6 +977,17 @@ static string Quote(string value)
 static string Unquote(string value)
 {
     return value.Trim().Trim('"');
+}
+
+static class NativeFs
+{
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool CreateHardLinkW(
+        string lpFileName,
+        string lpExistingFileName,
+        IntPtr lpSecurityAttributes
+    );
 }
 
 sealed record BridgeConfig(
